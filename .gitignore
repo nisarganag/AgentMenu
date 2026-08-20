@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+dist/
+*.app
+.DS_Store
+.superpowers/
+.vscode/
+publish.sh
+docs/

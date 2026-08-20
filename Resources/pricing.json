@@ -1,0 +1,26 @@
+{
+  "models": {
+    "claude-fable-5":    { "inputPerMTok": 10.0, "outputPerMTok": 50.0, "cacheReadPerMTok": 1.0,  "cacheWritePerMTok": 12.5, "contextWindow": 1000000 },
+    "claude-mythos-5":   { "inputPerMTok": 10.0, "outputPerMTok": 50.0, "cacheReadPerMTok": 1.0,  "cacheWritePerMTok": 12.5, "contextWindow": 1000000 },
+    "claude-opus-5":     { "inputPerMTok": 5.0,  "outputPerMTok": 25.0, "cacheReadPerMTok": 0.5,  "cacheWritePerMTok": 6.25, "contextWindow": 1000000 },
+    "claude-opus-4-8":   { "inputPerMTok": 5.0,  "outputPerMTok": 25.0, "cacheReadPerMTok": 0.5,  "cacheWritePerMTok": 6.25, "contextWindow": 1000000 },
+    "claude-opus-4-7":   { "inputPerMTok": 5.0,  "outputPerMTok": 25.0, "cacheReadPerMTok": 0.5,  "cacheWritePerMTok": 6.25, "contextWindow": 1000000 },
+    "claude-opus-4-6":   { "inputPerMTok": 5.0,  "outputPerMTok": 25.0, "cacheReadPerMTok": 0.5,  "cacheWritePerMTok": 6.25, "contextWindow": 1000000 },
+    "claude-sonnet-5":   { "inputPerMTok": 3.0,  "outputPerMTok": 15.0, "cacheReadPerMTok": 0.3,  "cacheWritePerMTok": 3.75, "contextWindow": 1000000 },
+    "claude-sonnet-4-6": { "inputPerMTok": 3.0,  "outputPerMTok": 15.0, "cacheReadPerMTok": 0.3,  "cacheWritePerMTok": 3.75, "contextWindow": 1000000 },
+    "claude-haiku-4-5":  { "inputPerMTok": 1.0,  "outputPerMTok": 5.0,  "cacheReadPerMTok": 0.1,  "cacheWritePerMTok": 1.25, "contextWindow": 200000 },
+    "claude-haiku-4-5-20251001": { "inputPerMTok": 1.0, "outputPerMTok": 5.0, "cacheReadPerMTok": 0.1, "cacheWritePerMTok": 1.25, "contextWindow": 200000 },
+
+    "opus":   { "inputPerMTok": 5.0, "outputPerMTok": 25.0, "cacheReadPerMTok": 0.5, "cacheWritePerMTok": 6.25, "contextWindow": 1000000 },
+    "sonnet": { "inputPerMTok": 3.0, "outputPerMTok": 15.0, "cacheReadPerMTok": 0.3, "cacheWritePerMTok": 3.75, "contextWindow": 1000000 },
+    "haiku":  { "inputPerMTok": 1.0, "outputPerMTok": 5.0,  "cacheReadPerMTok": 0.1, "cacheWritePerMTok": 1.25, "contextWindow": 200000 },
+
+    "gpt-5.6-sol":   { "inputPerMTok": 5.0,  "outputPerMTok": 30.0, "cacheReadPerMTok": 0.5,  "cacheWritePerMTok": 6.25 },
+    "gpt-5.6-terra": { "inputPerMTok": 2.0,  "outputPerMTok": 12.0, "cacheReadPerMTok": 0.2,  "cacheWritePerMTok": 2.5 },
+    "gpt-5.6-luna":  { "inputPerMTok": 0.2,  "outputPerMTok": 1.2,  "cacheReadPerMTok": 0.02, "cacheWritePerMTok": 0.25 },
+    "gpt-5.5":       { "inputPerMTok": 5.0,  "outputPerMTok": 30.0, "cacheReadPerMTok": 0.5,  "cacheWritePerMTok": 6.25 },
+
+    "deepseek-v4-pro": { "inputPerMTok": 0.435, "outputPerMTok": 0.87,  "cacheReadPerMTok": 0.003625, "contextWindow": 1000000 },
+    "kimi-k3":         { "inputPerMTok": 3.0,   "outputPerMTok": 15.0,  "cacheReadPerMTok": 0.3,      "contextWindow": 1048576 }
+  }
+}
