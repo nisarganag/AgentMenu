@@ -1,4 +1,8 @@
-# AgentMenu
+<p align="center">
+  <img src="icon.png" width="128" alt="AgentMenu">
+</p>
+
+<h1 align="center">AgentMenu</h1>
 
 A macOS menu bar app that tells you what your AI coding agents are doing — and when one is waiting on you.
 

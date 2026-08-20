@@ -42,6 +42,7 @@ bundle: build
 	cp Resources/Info.plist $(APP)/Contents/Info.plist
 	cp $(BIN) $(APP)/Contents/MacOS/AgentMenu
 	cp Resources/pricing.json $(APP)/Contents/Resources/
+	cp Resources/AppIcon.icns $(APP)/Contents/Resources/
 	mkdir -p $(APP)/Contents/Resources/Scripts
 	cp Scripts/*.sh $(APP)/Contents/Resources/Scripts/
 	chmod +x $(APP)/Contents/Resources/Scripts/*.sh
