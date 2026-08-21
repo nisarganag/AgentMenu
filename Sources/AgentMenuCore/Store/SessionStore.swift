@@ -14,6 +14,21 @@ public final class SessionStore: @unchecked Sendable {
     /// same session. Named because later tasks reference it directly.
     public static let pushWinsWindow: TimeInterval = 5
 
+    /// Longest a sticky (permission) override may hold once its session's
+    /// transcript has stopped moving, even with no resolve event and no
+    /// process signal at all. Matches spec §2's liveness grace.
+    ///
+    /// Bug 1: without this, killing the agent's terminal (or the whole
+    /// machine's network/process going away mid-prompt) left the red dot
+    /// pinned forever — the transcript never advances again, so the
+    /// existing "file evidence moved past the override" release condition
+    /// can never fire. This is the backstop for when `runningKinds` can't
+    /// help either (process liveness unknown, or another process of the
+    /// same kind is still around for an unrelated session): a real prompt
+    /// the user is actively looking at keeps its transcript fresh well
+    /// inside 90s, so this only ever fires once a prompt is certainly stale.
+    public static let stickyOverrideStaleness: TimeInterval = 90
+
     /// A push-derived state that temporarily outranks whatever the file
     /// watchers report for the same session.
     private struct Override {
@@ -31,6 +46,14 @@ public final class SessionStore: @unchecked Sendable {
     private let lock = NSLock()
     private var byKind: [AgentKind: [AgentSession]] = [:]
     private var overrides: [String: Override] = [:]      // keyed by AgentSession.id
+    /// Which agent kinds have at least one process running, as of the most
+    /// recent `apply(runningKinds:now:)` call. `nil` until that method has
+    /// been called at least once — the store must never treat "haven't been
+    /// told yet" as "confirmed nothing is running," or every sticky override
+    /// would look process-dead on the very first tick, before `ProcessScanner`
+    /// has run even once. The store does no process scanning itself (Bug 1 /
+    /// Bug 2): this is the only channel through which it learns liveness.
+    private var runningKinds: Set<AgentKind>?
 
     public init() {}
 
@@ -67,6 +90,37 @@ public final class SessionStore: @unchecked Sendable {
         expireOverrides(now: now)
     }
 
+    // MARK: - Process liveness (Bug 1 / Bug 2)
+
+    /// Tells the store which agent kinds currently have at least one running
+    /// process, per `ProcessScanner`. The store performs no I/O of its own —
+    /// callers (namely `AppDelegate.tick()`, where the scan already happens
+    /// for other reasons, e.g. focus-on-click) call this once per tick with
+    /// a fresh result.
+    ///
+    /// Two independent uses of the same signal:
+    ///  - Bug 1: a sticky permission override for a kind with NO running
+    ///    process anywhere is released immediately — no process of that
+    ///    kind means no live prompt for the user to be looking at, however
+    ///    stale or fresh the last-read transcript happens to be.
+    ///  - Bug 2: an opencode session reported `.working` for a kind with no
+    ///    running process is downgraded to `.idle` in `all` below — a dead
+    ///    process cannot genuinely be mid-turn, regardless of what a
+    ///    durable DB row still says. Scoped to opencode only (see `all`'s
+    ///    doc comment): Claude/Codex already self-correct out of `.working`
+    ///    within `stallThreshold` (25s) purely from transcript staleness —
+    ///    that is WHY the bug report never named them — so generalizing this
+    ///    to every kind would be an unrequested behaviour change with no
+    ///    reported problem behind it, and it would fight Bug 1's own test
+    ///    scenario: releasing a claudeCode override when its process vanishes
+    ///    must reveal the pull channel's actual `.working` state, not a
+    ///    second, unrelated demotion of it.
+    public func apply(runningKinds: Set<AgentKind>, now: Date) {
+        lock.lock(); defer { lock.unlock() }
+        self.runningKinds = runningKinds
+        expireOverrides(now: now)
+    }
+
     // MARK: - Push channel (hook spool)
 
     public func apply(events: [SpoolEvent], now: Date) {
@@ -92,20 +146,42 @@ public final class SessionStore: @unchecked Sendable {
     /// Drops overrides whose authority has run out.
     ///
     /// Non-sticky overrides simply time out. Sticky (permission) overrides
-    /// are only released once file evidence proves the session moved on
-    /// after the override was set — that self-heal is what stops a dropped
-    /// "resolved" event from pinning a red dot forever.
+    /// are released by any ONE of three independent proofs the prompt can no
+    /// longer be live:
+    ///  1. File evidence proves the session moved on after the override was
+    ///     set — the original self-heal, for a dropped "resolved" event.
+    ///  2. Bug 1: no process of this override's agent kind is running at
+    ///     all — the terminal (or the whole app) is gone.
+    ///  3. Bug 1 backstop: the session's transcript has been silent past
+    ///     `stickyOverrideStaleness`, regardless of process state — covers
+    ///     the case where liveness can't be attributed (or another process
+    ///     of the same kind is running an unrelated session).
+    /// Without ALL THREE, a killed terminal pins a red dot forever: the
+    /// transcript never advances again, so (1) alone never fires.
     private func expireOverrides(now: Date) {
         var expiredKeys: [String] = []
         for (key, o) in overrides {
             guard now.timeIntervalSince(o.at) > Self.pushWinsWindow else { continue }
-            if !o.sticky {
+            guard o.sticky else { expiredKeys.append(key); continue }
+
+            let session = flattenLocked().first(where: { $0.id == key })
+            if let session, session.lastEventAt > o.at {
                 expiredKeys.append(key)
-            } else if let s = flattenLocked().first(where: { $0.id == key }), s.lastEventAt > o.at {
+            } else if let runningKinds, let kind = Self.agentKind(ofOverrideKey: key),
+                      !runningKinds.contains(kind) {
+                expiredKeys.append(key)
+            } else if let session, now.timeIntervalSince(session.lastEventAt) > Self.stickyOverrideStaleness {
                 expiredKeys.append(key)
             }
         }
         for key in expiredKeys { overrides.removeValue(forKey: key) }
+    }
+
+    /// Recovers the `AgentKind` an override key was filed under (keys are
+    /// always `"\(kind.rawValue)/\(nativeId)"`, same shape `apply(sessions:)`
+    /// already parses via `hasPrefix` for its own release rule).
+    private static func agentKind(ofOverrideKey key: String) -> AgentKind? {
+        AgentKind.allCases.first { key.hasPrefix("\($0.rawValue)/") }
     }
 
     private func flattenLocked() -> [AgentSession] {
@@ -118,9 +194,25 @@ public final class SessionStore: @unchecked Sendable {
     /// display order (spec §5).
     public var all: [AgentSession] {
         lock.lock(); defer { lock.unlock() }
-        return flattenLocked().map { session in
-            guard let o = overrides[session.id] else { return session }
-            var overridden = session
+        return flattenLocked().map { session -> AgentSession in
+            var s = session
+            // Bug 2: opencode's DB simply stops being written the moment its
+            // app quits, so nothing but `idleThreshold` would otherwise ever
+            // demote a session frozen mid-"working". A confirmed-dead
+            // process is proof right now, not a guess. Scoped to `.opencode`
+            // deliberately — Claude/Codex already self-correct out of
+            // `.working` within `stallThreshold` (25s) from transcript
+            // staleness alone, with no process signal needed, which is why
+            // only opencode was reported stuck. Gated on `runningKinds`
+            // being known (non-nil) so this never fires before the store has
+            // actually been told anything, e.g. the first tick before
+            // ProcessScanner has run even once.
+            if case .working = s.state, s.kind == .opencode,
+               let runningKinds, !runningKinds.contains(s.kind) {
+                s.state = .idle
+            }
+            guard let o = overrides[s.id] else { return s }
+            var overridden = s
             overridden.state = o.state
             return overridden
         }.sortedForDisplay()

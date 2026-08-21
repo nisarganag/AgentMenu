@@ -18,6 +18,13 @@ public final class AppViewModel {
     public var burnFraction: Double?
     public var installerStatus: (claude: Bool, codex: Bool) = (false, false)
 
+    /// Which agent's page `PagedPopoverView` is currently showing. Doubles
+    /// as (a) the two-way `.scrollPosition(id:)` binding target the paged
+    /// view swipes/taps update, and (b) "the last page the user was on" —
+    /// the final fallback `pageToShowOnOpen()` uses when no agent currently
+    /// demands attention. Defaults to the first page in the fixed order.
+    public var currentPage: AgentKind = .claudeCode
+
     private let store: SessionStore
     private var burn = RollingBurn()
 
@@ -36,6 +43,17 @@ public final class AppViewModel {
     /// Called by the app when a source reports new totals.
     public func recordBurn(tokens: Int, cost: Double?, at: Date) {
         burn.record(tokens: tokens, cost: cost, at: at)
+    }
+
+    /// Which page the popover should open to (round-2 fix: "whichever agent
+    /// sent the last notification"). The actual tie-breaking rule
+    /// (exact permission > inferred permission > most-recent turn-finished)
+    /// is `Array<AgentSession>.mostUrgentAgentKind`, a pure function in
+    /// AgentMenuCore with its own test coverage — this is a thin, otherwise
+    /// untestable-UI-glue accessor over it, using `currentPage` (the last
+    /// page the user was on) as the final fallback.
+    public func pageToShowOnOpen() -> AgentKind {
+        sessions.mostUrgentAgentKind(fallback: currentPage)
     }
 
     /// Focus the window this session lives in. Best-effort by design: if the

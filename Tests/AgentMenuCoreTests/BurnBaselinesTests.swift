@@ -50,3 +50,41 @@ import Foundation
     #expect(BurnBaselines.pruned([String: Int](), liveIds: ["claudeCode/a"],
                                  erroredKinds: [.claudeCode]).isEmpty)
 }
+
+// MARK: - Bug 3: first sight of a session must seed its baseline, never bill
+// its entire lifetime total as burn that happened just now.
+//
+// Reported live: opencode's lifetime cost across every session on the
+// machine was $61.76 (`select sum(cost) from session`), yet the header read
+// "TODAY $2424" right after a fresh launch — a session last touched two
+// hours ago, but running for six days beforehand, dumped its whole
+// six-day total into that one tick because `prior` was `nil`.
+
+@Test func firstSightSeedsTheBaselineWithoutRecordingAnyBurn() {
+    let d = BurnBaselines.delta(current: (tokens: 500_000, cost: 61.76), prior: nil)
+    #expect(d.tokens == 0)
+    #expect(d.cost == 0)
+}
+
+@Test func subsequentSightRecordsOnlyTheDeltaSinceThePriorBaseline() {
+    let d = BurnBaselines.delta(current: (tokens: 500_100, cost: 61.80),
+                                prior: (tokens: 500_000, cost: 61.76))
+    #expect(d.tokens == 100)
+    #expect(abs(d.cost - 0.04) < 0.0001)
+}
+
+@Test func deltaNeverGoesNegativeIfTotalsAppearToShrink() {
+    // Defensive: a rescan racing a write, or totals that otherwise appear to
+    // shrink, must never produce negative "burn" that silently cancels out
+    // real spend recorded elsewhere.
+    let d = BurnBaselines.delta(current: (tokens: 10, cost: 0), prior: (tokens: 500, cost: 5))
+    #expect(d.tokens == 0)
+    #expect(d.cost == 0)
+}
+
+@Test func unchangedTotalsProduceAZeroDeltaOnAnIdleTick() {
+    let d = BurnBaselines.delta(current: (tokens: 500_000, cost: 61.76),
+                                prior: (tokens: 500_000, cost: 61.76))
+    #expect(d.tokens == 0)
+    #expect(d.cost == 0)
+}

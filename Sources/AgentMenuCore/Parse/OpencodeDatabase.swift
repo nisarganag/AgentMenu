@@ -15,18 +15,29 @@ public final class OpencodeDatabase: @unchecked Sendable {
     }
 
     /// No activity for this long and the session is treated as finished.
-    public static let idleThreshold: TimeInterval = 120
+    ///
+    /// Bug 2: this used to be 120s while `ClaudeTranscriptParser` and
+    /// `CodexRolloutParser`'s `stallThreshold` were both 25s — the only
+    /// reason opencode visibly lagged the other two agents in going back to
+    /// idle/done after its app closed (its DB simply stops being written at
+    /// that point, so this timeout was the ONLY thing that could ever demote
+    /// it). Matched to 25s so the three agents behave consistently. Process
+    /// liveness (`SessionStore.apply(runningKinds:now:)`) now also catches
+    /// the closed-app case directly, faster than any timeout can.
+    public static let idleThreshold: TimeInterval = 25
 
     /// A pending tool `part` is a durable database row — opencode never
     /// rewrites it once a turn is abandoned, so it persists forever whether
     /// or not anyone is actually waiting on it. Real sessions on this machine
     /// carry a pending part up to 99+ days after they went stale. Only trust
     /// it as a LIVE signal if the session itself was touched within this
-    /// window; 600s (not `idleThreshold`'s 120s) is deliberate — a human
+    /// window; 600s (not `idleThreshold`'s 25s) is deliberate — a human
     /// genuinely sitting on a prompt for a few minutes must still show red,
     /// and the closest real false positive found was 6.6 *days* old, so
-    /// there is enormous margin either way. (A later task can tighten this
-    /// with process liveness; this layer can't see processes.)
+    /// there is enormous margin either way. `SessionStore` now has process
+    /// liveness (Bug 1/2) for the sticky-override and `.working` cases, but
+    /// this DB layer still can't see processes and still shouldn't guess —
+    /// leave this alone; it guards a different, durable-artifact problem.
     public static let permissionFreshness: TimeInterval = 600
 
     private var db: OpaquePointer?

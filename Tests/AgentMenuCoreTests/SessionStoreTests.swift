@@ -175,3 +175,92 @@ private func event(_ id: String, _ kind: SpoolEvent.Kind, at: Date) -> SpoolEven
         return
     }
 }
+
+// MARK: - Bug 1: a permission dot must clear once the agent is demonstrably
+// no longer live, even with no resolve event and no file evidence ever
+// advancing again (the reported failure: closing the whole terminal).
+
+@Test func stickyOverrideSurvivesWhileTheProcessIsAliveAndTheSessionIsFresh() {
+    let store = SessionStore()
+    store.apply(events: [event("s1", .permissionRequired, at: t)], now: t)
+    let later = t.addingTimeInterval(10)   // past pushWinsWindow, nowhere near the 90s staleness ceiling
+    store.apply(sessions: [session("s1", .claudeCode, .working(Activity(body: .thinking, at: t)), at: t)],
+                kind: .claudeCode, now: later)
+    store.apply(runningKinds: [.claudeCode], now: later)
+    guard case .awaitingPermission = store.all.first?.state else {
+        Issue.record("a live process with a fresh transcript must keep the red dot, got \(String(describing: store.all.first?.state))")
+        return
+    }
+}
+
+// Reproduces the exact reported scenario: a Claude session asks for
+// permission, then the user closes the whole terminal. The transcript can
+// never advance again, so the pre-existing file-evidence release condition
+// alone would leave this stuck forever — process liveness is what breaks
+// the deadlock.
+@Test func stickyOverrideReleasesWhenTheAgentProcessVanishesEntirely() {
+    let store = SessionStore()
+    store.apply(events: [event("s1", .permissionRequired, at: t)], now: t)
+    let soonAfter = t.addingTimeInterval(6)   // just past pushWinsWindow, far short of 90s staleness
+    store.apply(sessions: [session("s1", .claudeCode, .working(Activity(body: .thinking, at: t)), at: t)],
+                kind: .claudeCode, now: soonAfter)
+    store.apply(runningKinds: [], now: soonAfter)   // no claude process anywhere any more
+    guard case .working = store.all.first?.state else {
+        Issue.record("a dead process must release a sticky override even though the transcript never advanced, got \(String(describing: store.all.first?.state))")
+        return
+    }
+}
+
+@Test func stickyOverrideReleasesOnStalenessEvenIfProcessLivenessSaysStillRunning() {
+    // Backstop: even if a claude process is technically alive somewhere (a
+    // second, unrelated session), THIS session's own transcript silence past
+    // the ceiling proves nobody is actively staring at ITS prompt any more.
+    let store = SessionStore()
+    store.apply(events: [event("s1", .permissionRequired, at: t)], now: t)
+    let wayLater = t.addingTimeInterval(SessionStore.stickyOverrideStaleness + 1)
+    store.apply(sessions: [session("s1", .claudeCode, .working(Activity(body: .thinking, at: t)), at: t)],
+                kind: .claudeCode, now: wayLater)
+    store.apply(runningKinds: [.claudeCode], now: wayLater)
+    guard case .working = store.all.first?.state else {
+        Issue.record("staleness past the ceiling must release the override even while the kind is still reported running, got \(String(describing: store.all.first?.state))")
+        return
+    }
+}
+
+// MARK: - Bug 2: a `.working` state needs a live process behind it.
+
+@Test func workingStateIsDowngradedWhenNoProcessOfThatKindIsRunning() {
+    let store = SessionStore()
+    store.apply(sessions: [session("s1", .opencode, .working(Activity(body: .thinking, at: t)), at: t)],
+                kind: .opencode, now: t)
+    store.apply(runningKinds: [], now: t)   // the opencode app has fully quit
+    if case .working = store.all.first?.state {
+        Issue.record("a dead opencode process must not leave the session reading WORKING")
+    }
+}
+
+@Test func workingStateSurvivesWhileItsProcessIsStillRunning() {
+    let store = SessionStore()
+    store.apply(sessions: [session("s1", .opencode, .working(Activity(body: .thinking, at: t)), at: t)],
+                kind: .opencode, now: t)
+    store.apply(runningKinds: [.opencode], now: t)
+    guard case .working = store.all.first?.state else {
+        Issue.record("a live process must not have its working state second-guessed, got \(String(describing: store.all.first?.state))")
+        return
+    }
+}
+
+@Test func processLivenessNeverActsBeforeItIsKnown() {
+    // Regression guard against the opposite bug: before `apply(runningKinds:)`
+    // is ever called (e.g. the very first tick, before ProcessScanner has run
+    // even once), a `.working` state must not be second-guessed just because
+    // liveness defaults to "nothing known" — that would misreport every
+    // session as not-working for a tick on every single launch.
+    let store = SessionStore()
+    store.apply(sessions: [session("s1", .opencode, .working(Activity(body: .thinking, at: t)), at: t)],
+                kind: .opencode, now: t)
+    guard case .working = store.all.first?.state else {
+        Issue.record("liveness must stay a no-op until the store has actually been told something, got \(String(describing: store.all.first?.state))")
+        return
+    }
+}

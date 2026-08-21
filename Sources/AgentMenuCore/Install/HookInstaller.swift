@@ -2,11 +2,20 @@ import Foundation
 
 /// Installs and removes AgentMenu's hooks in the agents' own config files.
 ///
-/// Every entry AgentMenu adds is tagged `_agentmenu: true` so uninstall
-/// removes exactly what was added and nothing else. Every edit is backed up
-/// (once, timestamped) before the first byte changes. Every write goes to a
-/// temp file and is renamed into place, so a crash mid-write cannot corrupt
-/// a config the user's agents depend on to run at all.
+/// Every entry AgentMenu adds is tagged `_agentmenu: true` so uninstall can
+/// identify exactly what was added and nothing else — but the marker alone
+/// is not trusted, because it isn't ours to keep. Claude Code itself owns
+/// and periodically rewrites `settings.json` (observed directly: it
+/// normalises entries and has stripped the unknown `_agentmenu` key from
+/// ones AgentMenu wrote). `isOurGroup` below therefore also recognises an
+/// entry by the hook script's filename appearing in its command string —
+/// a signal Claude Code has no reason to touch — so a marker-stripped
+/// entry is still found by `installClaude` (preventing an unbounded
+/// duplicate) and by `uninstallClaude` (which would otherwise be unable to
+/// remove it at all). Either signal is sufficient on its own. Every edit is
+/// backed up (once, timestamped) before the first byte changes. Every write
+/// goes to a temp file and is renamed into place, so a crash mid-write
+/// cannot corrupt a config the user's agents depend on to run at all.
 ///
 /// The Claude side never reserializes the whole settings file through
 /// `JSONSerialization`. `settings.json` can carry large, independently
@@ -38,6 +47,13 @@ public struct HookInstaller: Sendable {
 
     static let marker = "_agentmenu"
 
+    /// Filename-only, not the full current `scriptsDir`-qualified path — an
+    /// entry written by an earlier install (potentially from a different
+    /// `scriptsDir`, e.g. the app relocated) must still be recognised as
+    /// ours by `isOurGroup`, so matching is a *substring* against this
+    /// stable filename rather than exact equality against `hookScript`.
+    static let hookScriptFilename = "agentmenu-hook.sh"
+
     let claudeSettings: URL
     let codexConfig: URL
     let scriptsDir: URL
@@ -48,7 +64,7 @@ public struct HookInstaller: Sendable {
         self.scriptsDir = scriptsDir
     }
 
-    private var hookScript: String { scriptsDir.appendingPathComponent("agentmenu-hook.sh").path }
+    private var hookScript: String { scriptsDir.appendingPathComponent(Self.hookScriptFilename).path }
     private var shimScript: String { scriptsDir.appendingPathComponent("codex-notify-shim.sh").path }
 
     // MARK: - Claude
@@ -81,8 +97,12 @@ public struct HookInstaller: Sendable {
         var changed = false
         for (event, arg) in plan {
             var groups = hooks[event] as? [[String: Any]] ?? []
-            let already = groups.contains { ($0[Self.marker] as? Bool) == true }
-            if already { continue }
+            let oursCount = groups.filter(Self.isOurGroup).count
+            if oursCount == 1 { continue }         // exactly one of ours already: untouched, stays idempotent
+            // 0 -> append a fresh entry. >1 -> Claude Code (or a prior
+            // marker-stripped install) left duplicates behind; self-heal by
+            // collapsing them to exactly one rather than appending a third.
+            groups.removeAll(where: Self.isOurGroup)
             groups.append([
                 Self.marker: true,
                 "matcher": "",
@@ -107,14 +127,31 @@ public struct HookInstaller: Sendable {
         for event in hooks.keys {
             guard var groups = hooks[event] as? [[String: Any]] else { continue }
             let before = groups.count
-            groups.removeAll { ($0[Self.marker] as? Bool) == true }
+            groups.removeAll(where: Self.isOurGroup)
             if groups.count != before { changed = true }
             if groups.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = groups }
         }
-        guard changed else { return }               // nothing tagged; leave the file untouched
+        guard changed else { return }               // nothing of ours found; leave the file untouched
 
         let newText = try Self.replacingTopLevelValue("hooks", with: hooks, in: text)
         try atomicWrite(newText, to: claudeSettings)
+    }
+
+    /// True if `group` is one AgentMenu itself created. Checks the
+    /// `_agentmenu` marker first, but does not stop there: Claude Code owns
+    /// `settings.json` and has been observed silently stripping unknown keys
+    /// (including this one) while rewriting entries it manages, which would
+    /// otherwise orphan AgentMenu's own hook group — invisible to both the
+    /// idempotency check (so a re-install appends an unbounded duplicate)
+    /// and to `uninstallClaude` (so it could never be removed again). The
+    /// second, independent signal is the hook script's filename appearing in
+    /// any of the group's command strings — something Claude Code has no
+    /// reason to rewrite. Either signal alone is sufficient.
+    private static func isOurGroup(_ group: [String: Any]) -> Bool {
+        if (group[marker] as? Bool) == true { return true }
+        let commands = (group["hooks"] as? [[String: Any]])?
+            .compactMap { $0["command"] as? String } ?? []
+        return commands.contains { $0.contains(hookScriptFilename) }
     }
 
     // MARK: - Codex
@@ -123,7 +160,15 @@ public struct HookInstaller: Sendable {
         guard let toml = try? String(contentsOf: codexConfig, encoding: .utf8) else {
             throw Error.unreadable(codexConfig.path)
         }
-        if toml.contains("codex-notify-shim") { return }        // idempotent
+        // Genuinely active only, not merely "our shim path appears
+        // somewhere in the file" — Codex's Computer Use component has been
+        // observed to reclaim this slot for its own program and preserve
+        // whatever it displaced (including our shim path) as a trailing
+        // argument. A broader substring match would treat that reclaimed,
+        // inert state as "already installed" and silently no-op forever,
+        // so a user who notices via `status()` and tries to re-enable the
+        // toggle could never actually recover. See `notifyIsGenuinelyOurShim`.
+        if Self.notifyIsGenuinelyOurShim(toml) { return }        // idempotent
 
         // A `notify = [...]` array that spans multiple lines is valid TOML,
         // but replacing just its opening line (as the single-line splice
@@ -149,6 +194,17 @@ public struct HookInstaller: Sendable {
         try atomicWrite(updated, to: codexConfig)
     }
 
+    /// Also correctly handles the "reclaimed" shape: if Codex has since
+    /// rewritten `notify` to point at its own program (preserving whatever
+    /// it displaced, including our shim path, as a trailing argument — see
+    /// `notifyIsGenuinelyOurShim`), the top guard below still fires (the
+    /// shim path substring is still present on the line), and `original` is
+    /// still read from THIS installer's own shim file on disk — untouched
+    /// by whatever Codex did to config.toml — so the restore below replaces
+    /// whatever the *current* `notify` line is (reclaimed or not) with the
+    /// user's true original, never something derived from the reclaimed
+    /// text. If the shim is missing or its blob doesn't decode to a notify
+    /// assignment, this leaves the line alone rather than guess.
     public func uninstallCodex() throws {
         guard let toml = try? String(contentsOf: codexConfig, encoding: .utf8),
               toml.contains("codex-notify-shim") else { return }   // idempotent: nothing to undo
@@ -177,18 +233,42 @@ public struct HookInstaller: Sendable {
         try atomicWrite(toml.replacingCharacters(in: range, with: original), to: codexConfig)
     }
 
-    public func status() -> (claude: Bool, codex: Bool) {
+    /// `codex` is true only when the shim is *genuinely* the program Codex
+    /// invokes (see `notifyIsGenuinelyOurShim`) — not merely detectable
+    /// somewhere in the file. `codexOverridden` distinguishes "Codex
+    /// reclaimed the slot" from "never installed": both report `codex ==
+    /// false`, but only the reclaimed case reports `codexOverridden ==
+    /// true`, so the UI can tell the user the truth instead of a flat "off"
+    /// that looks identical to having never turned it on.
+    public func status() -> (claude: Bool, codex: Bool, codexOverridden: Bool) {
         let root = (try? Self.parseObject(readText(claudeSettings), source: claudeSettings.path)) ?? [:]
         let claude = (root["hooks"] as? [String: Any])?
             .values.contains { groups in
-                (groups as? [[String: Any]])?.contains { ($0[Self.marker] as? Bool) == true } ?? false
+                (groups as? [[String: Any]])?.contains(where: Self.isOurGroup) ?? false
             } ?? false
-        let codex = (try? String(contentsOf: codexConfig, encoding: .utf8))?
-            .contains("codex-notify-shim") ?? false
-        return (claude, codex)
+
+        let toml = (try? String(contentsOf: codexConfig, encoding: .utf8)) ?? ""
+        let codexActive = Self.notifyIsGenuinelyOurShim(toml)
+        let notifyLine = Self.notifyLineRange(in: toml).map { String(toml[$0]) } ?? ""
+        let codexOverridden = !codexActive && notifyLine.contains("codex-notify-shim")
+        return (claude, codexActive, codexOverridden)
     }
 
     // MARK: - Codex TOML helpers
+
+    /// True only if the notify array's *program* slot — element 0, the one
+    /// Codex actually executes — is our shim. A prior version of `status()`
+    /// (and `installCodex`'s idempotency guard) checked `toml.contains(
+    /// "codex-notify-shim")` anywhere in the file, which stays true even
+    /// after Codex's Computer Use component reclaims the slot for its own
+    /// program and demotes our shim to a trailing argument it is never
+    /// executed from — so the old check kept reporting "installed and
+    /// working" for a shim that had gone silently dead. Scoped to `.first`
+    /// so an appearance anywhere else (an argument, a comment) does not
+    /// count.
+    static func notifyIsGenuinelyOurShim(_ toml: String) -> Bool {
+        parseNotify(toml).first?.contains("codex-notify-shim") ?? false
+    }
 
     /// All elements of `notify = ["a", "b", ...]`, in the order they appear.
     ///

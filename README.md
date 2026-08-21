@@ -4,12 +4,22 @@
 
 <h1 align="center">AgentMenu</h1>
 
+<p align="center">
+  <a href="https://github.com/nisarganag/AgentMenu/releases/latest">
+    <img alt="latest release" src="https://img.shields.io/github/v/release/nisarganag/AgentMenu?color=brightgreen&label=release"></a>
+  <img alt="platform macOS 14+" src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey">
+  <img alt="universal binary" src="https://img.shields.io/badge/arch-universal%20(arm64%20%2B%20x86__64)-blue">
+  <img alt="Swift 6.0" src="https://img.shields.io/badge/Swift-6.0-orange">
+  <img alt="155 tests passing" src="https://img.shields.io/badge/tests-155%20passing-success">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green">
+</p>
+
 A macOS menu bar app that tells you what your AI coding agents are doing — and when one is waiting on you.
 
 If you run **Claude Code**, **Codex**, and **opencode** across several terminals, VS Code windows and apps, you lose track of which one is working, which one finished ten minutes ago, and which one has been sitting on a permission prompt you never saw. AgentMenu puts all of it in one place.
 
 ```text
-Today  $4.82          last 5h  2.4M tok                        ⚙
+Since launch  $4.82   last 5h  2.4M tok                        ⚙
 ────────────────────────────────────────────────────────────────
 CLAUDE CODE
 ┃ ●  ezeeabanotes  ⌥ business-insightaba      NEEDS PERMISSION
@@ -27,13 +37,18 @@ OPENCODE
 ┃    ▰▰░░░░░░░░░░░░  11%    51.5k tok    $0.45        8m41s
 ```
 
-Click a row to jump to the window that agent lives in. The menu bar icon badges red the moment something needs you.
+**One page per agent**, swiped horizontally, with three dots showing where you are. Opening the
+popover lands you on whichever agent most recently wanted something — so the thing demanding
+attention is the thing you see first.
+
+Click a row to jump to the window that agent lives in. The menu bar icon badges red for a
+confirmed permission block, amber for an inferred one.
 
 ---
 
 ## Install
 
-Download `AgentMenu-1.0.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.1.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -104,7 +119,9 @@ Two channels feed the app.
 - `~/.claude/settings.json` gains `Notification` and `Stop` hook entries
 - `~/.codex/config.toml`'s `notify` is pointed at a shim that **forwards to whatever was there before**, so an existing integration keeps working unchanged
 
-Both are opt-in from Preferences and fully reversible. Before either file is touched a timestamped backup is written, and uninstall removes exactly what was added — every entry AgentMenu writes carries an `_agentmenu` tag. The Codex shim stores your original `notify` line base64-encoded inside itself so uninstall restores it byte-for-byte.
+Both are opt-in from Preferences and fully reversible. Before either file is touched a timestamped backup is written, and uninstall removes exactly what was added — entries are identified by their command path, not by a marker key, because Claude Code rewrites `settings.json` itself and strips keys it doesn't recognise. The Codex shim stores your original `notify` line base64-encoded inside itself so uninstall restores it byte-for-byte.
+
+Codex actively manages its own `notify` setting and may reclaim it. When that happens AgentMenu detects it and says so in Preferences rather than showing a toggle that looks on but does nothing — it will not fight Codex on a timer and churn your config.
 
 The installer will **refuse rather than risk your config** if it meets something it can't safely round-trip (a multi-line `notify` array, for instance). Not getting permission alerts is an acceptable outcome; a Codex that won't start is not.
 
@@ -129,9 +146,9 @@ Full Xcode is not required — Command Line Tools are enough.
 ```bash
 git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
-swift test          # 130 tests
+swift test          # 155 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.0.0.dmg
+make dmg            # dist/AgentMenu-1.1.0.dmg
 make install        # copy to /Applications
 ```
 

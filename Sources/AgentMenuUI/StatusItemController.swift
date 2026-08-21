@@ -18,6 +18,13 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
         popover.animates = false
         popover.contentViewController = NSHostingController(
             rootView: PopoverView(model: model, onPreferences: onPreferences, onQuit: onQuit))
+        // Belt-and-suspenders alongside PopoverView's own fixed `.frame`
+        // (round-2 fix): NSPopover would otherwise size itself from
+        // NSHostingController's preferred content size, which is exactly
+        // the path that let the popover resize/reposition/clip as content
+        // changed. Setting this explicitly makes NSPopover authoritative
+        // too, not just the SwiftUI view.
+        popover.contentSize = NSSize(width: Theme.popoverWidth, height: Theme.popoverHeight)
     }
 
     public func install() {
@@ -34,6 +41,13 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             model.refresh()
+            // Round-2 fix: land on whichever agent most recently demanded
+            // attention (exact permission prompt, then inferred, then
+            // most-recently-finished turn) rather than always reopening on
+            // whatever page was last viewed. Set BEFORE `show`, so the
+            // paged view is already scrolled to the right page the instant
+            // it becomes visible — no on-screen jump.
+            model.currentPage = model.pageToShowOnOpen()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }

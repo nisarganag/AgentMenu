@@ -46,5 +46,5 @@ private let now = Date(timeIntervalSince1970: 1_755_689_400)
     // No temp files left behind.
     let siblings = try FileManager.default.contentsOfDirectory(
         atPath: url.deletingLastPathComponent().path)
-    #expect(siblings.contains { $0.hasSuffix(".agentmenu-tmp") } == false)
+    #expect(!siblings.contains { $0.hasSuffix(".agentmenu-tmp") })
 }

@@ -252,3 +252,26 @@ private let t0 = 1_755_600_000_000   // ms
     let s = try #require(source.rescan(now: Date(timeIntervalSince1970: Double(t0) / 1000)).first)
     #expect(s.context == nil, "no known window means no meter, never a fake one")
 }
+
+// MARK: - Bug 2: idleThreshold matched to the other parsers' stallThreshold.
+
+// This used to be 120s while ClaudeTranscriptParser/CodexRolloutParser's
+// stallThreshold was 25s — the reported asymmetry ("opencode keeps showing
+// WORKING long after the app is closed... doesn't happen with claude and
+// codex"). Confirmed live against this machine's real DB too: every real
+// session, including the one last touched ~6.4h ago, already reads `.done`
+// at the corrected threshold.
+@Test func idleThresholdMatchesTheOtherParsersTwentyFiveSeconds() throws {
+    let path = try makeDB(
+        [(id: "s1", title: "t", dir: "/p", cost: 0, updated: t0, permission: nil)],
+        parts: [(session: "s1", data: #"{"type":"text","text":"still going"}"#, created: t0)])
+    let db = try OpencodeDatabase(path: path)
+    // 30s of silence: WORKING under the old 120s threshold, DONE under the
+    // corrected 25s one.
+    let thirtySecondsLater = Date(timeIntervalSince1970: Double(t0) / 1000 + 30)
+    let s = try #require(db.sessions(since: .distantPast, now: thirtySecondsLater).first)
+    guard case .done = s.state else {
+        Issue.record("30s of silence must already read as done at the corrected 25s threshold, got \(s.state)")
+        return
+    }
+}

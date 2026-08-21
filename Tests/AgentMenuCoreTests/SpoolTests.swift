@@ -33,7 +33,7 @@ private let now = Date(timeIntervalSince1970: 1_755_689_500)
     #expect(events[0].sessionId == "s1")
     #expect(events[0].cwd == "/p")
     #expect(events[0].tool == "Bash")
-    #expect(events[0].summary?.contains("rm -rf x") == true)
+    #expect(events[0].summary?.contains("rm -rf x") ?? false)
     // Draining consumes: a second call must be empty, or events replay forever.
     #expect(w.drain(now: now).isEmpty)
     #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)

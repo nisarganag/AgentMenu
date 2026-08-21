@@ -7,7 +7,7 @@ public struct PreferencesView: View {
 
     @State private var startAtLogin = LoginItem.isEnabled
     @State private var loginNote = LoginItem.statusDescription
-    @State private var hooks: (claude: Bool, codex: Bool)
+    @State private var hooks: (claude: Bool, codex: Bool, codexOverridden: Bool)
     @State private var notificationsOn: Bool
     @State private var mutedKinds: Set<AgentKind>
     @State private var budgetText: String
@@ -53,6 +53,21 @@ public struct PreferencesView: View {
                     try? on ? installer.installCodex() : installer.uninstallCodex()
                     hooks = installer.status()
                 }))
+            // Codex's Computer Use component can reclaim the `notify` slot
+            // for its own program later, silently leaving AgentMenu's shim
+            // un-invoked. The toggle above already renders correctly OFF in
+            // that case (`hooks.codex` — see HookInstaller.status() —
+            // reports genuine activity, not just presence), but "off" alone
+            // reads identically to "never turned on"; this line tells the
+            // user which one actually happened, matching loginNote's plain
+            // inline-explanation style just above rather than a colored
+            // warning.
+            if hooks.codexOverridden {
+                Text("Codex reclaimed its notify setting — AgentMenu's Codex alerts are inactive. Re-enable to try again.")
+                    .font(Theme.activity)
+                    .foregroundStyle(Theme.textTertiary(dark: dark))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Text("Codex logs no approval events, so its permission state is always an estimate.")
                 .font(Theme.activity)
                 .foregroundStyle(Theme.textTertiary(dark: dark))

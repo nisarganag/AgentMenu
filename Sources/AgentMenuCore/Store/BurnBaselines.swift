@@ -28,4 +28,30 @@ public enum BurnBaselines {
             liveIds.contains(key) || erroredKinds.contains { key.hasPrefix("\($0.rawValue)/") }
         }
     }
+
+    /// The token/cost burn to record for one session on one tick, given its
+    /// current cumulative totals and the totals last recorded for it (`nil`
+    /// on first sight).
+    ///
+    /// Bug 3: a session's `tokens.total`/`cost` are cumulative lifetime
+    /// figures, not "new activity." On first sight there is no prior
+    /// baseline to diff against — recording the totals as-is attributes a
+    /// session's ENTIRE history to whatever instant AgentMenu happened to
+    /// launch. Reported live: opencode's lifetime spend across every session
+    /// on the machine was $61.76, yet the header read "TODAY $2424" after a
+    /// fresh launch, because a six-day-old session last touched two hours
+    /// earlier dumped six days of cost into that one tick. Seeding the
+    /// baseline with a zero delta on first sight — instead of the full
+    /// total — means only burn actually OBSERVED while AgentMenu is watching
+    /// is ever counted; spend that happened before launch was never
+    /// observed and must not be claimed (never a plausible-looking lie).
+    /// Clamped at 0 either way: a rescan racing a DB write, or totals that
+    /// otherwise appear to shrink, must never produce negative burn.
+    public static func delta(
+        current: (tokens: Int, cost: Double), prior: (tokens: Int, cost: Double)?
+    ) -> (tokens: Int, cost: Double) {
+        guard let prior else { return (tokens: 0, cost: 0) }
+        return (tokens: max(0, current.tokens - prior.tokens),
+                cost: max(0, current.cost - prior.cost))
+    }
 }

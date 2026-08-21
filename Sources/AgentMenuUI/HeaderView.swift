@@ -18,7 +18,17 @@ public struct HeaderView: View {
 
     public var body: some View {
         HStack(spacing: 10) {
-            metric("Today", String(format: "$%.2f", todayCost))
+            // Bug 3: this used to be labelled "Today", but the figure behind
+            // it only ever counts burn actually OBSERVED while AgentMenu was
+            // running (AppDelegate.tick()/BurnBaselines.delta seed a new
+            // session's baseline without backdating its lifetime total into
+            // "today") — spend from earlier in the calendar day, before
+            // launch, is invisible to it and always will be (reconstructing
+            // true calendar-day spend from message timestamps is out of
+            // scope). Labelling that "Today" is exactly the kind of
+            // plausible-looking lie this app refuses elsewhere; "Since
+            // Launch" says only what is actually known.
+            metric("Since Launch", String(format: "$%.2f", todayCost))
             metric("Last 5h", burnFraction.map {
                 "\(SessionRowView.compact(burn5h)) tok  \(Int($0 * 100))%"
             } ?? "\(SessionRowView.compact(burn5h)) tok")

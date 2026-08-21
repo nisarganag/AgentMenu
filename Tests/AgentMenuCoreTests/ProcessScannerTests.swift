@@ -26,7 +26,7 @@ private let psSample = """
 
 @Test func ignoresUnrelatedProcesses() {
     let found = ProcessScanner.parse(psOutput: psSample)
-    #expect(found.contains { $0.pid == 70002 } == false)
+    #expect(!found.contains { $0.pid == 70002 })
 }
 
 @Test func ignoresOurOwnGrepAndSimilarFalsePositives() {

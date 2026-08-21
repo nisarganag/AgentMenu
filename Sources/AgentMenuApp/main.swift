@@ -186,6 +186,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastProcessScan = now
         }
         let running = cachedRunningAgents
+        // Bug 1 / Bug 2: tell the store what's actually running so it can
+        // release a permission override whose agent process is gone
+        // (SessionStore.apply(runningKinds:now:) doc comment) and downgrade
+        // a `.working` opencode session left behind when the app quit
+        // outright, without waiting on that source's own idle timeout. The
+        // store does no scanning itself — this IS the scan, already needed
+        // below for pid attribution.
+        store.apply(runningKinds: Set(running.map(\.kind)), now: now)
         var liveSessionIds: Set<String> = []
         // Fix 5 / review Ruling F63: which kinds failed to report at all
         // this pass. Baselines belonging to one of these are carried
@@ -247,11 +255,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // s.tokens.total is cumulative, so record only what's new since
                 // the last tick — otherwise an idle session re-adds its whole
                 // total on every heartbeat (round-2 fix report, Finding 1).
+                // Bug 3: `prior == nil` means first sight of this session, not
+                // "zero burn so far" — BurnBaselines.delta seeds the baseline
+                // with a zero delta in that case instead of recording the
+                // session's entire cumulative lifetime total as if it all
+                // happened just now (see its doc comment for the $2424 story).
                 let prior = recordedTotals[key]
-                let dTokens = max(0, s.tokens.total - (prior?.tokens ?? 0))
-                let dCost = max(0, (s.cost ?? 0) - (prior?.cost ?? 0))
-                if dTokens > 0 || dCost > 0 {
-                    model.recordBurn(tokens: dTokens, cost: s.cost == nil ? nil : dCost, at: s.lastEventAt)
+                let burn = BurnBaselines.delta(current: (s.tokens.total, s.cost ?? 0), prior: prior)
+                if burn.tokens > 0 || burn.cost > 0 {
+                    model.recordBurn(tokens: burn.tokens, cost: s.cost == nil ? nil : burn.cost,
+                                     at: s.lastEventAt)
                 }
                 recordedTotals[key] = (s.tokens.total, s.cost ?? 0)
             }

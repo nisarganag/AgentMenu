@@ -39,5 +39,12 @@ public enum Theme {
     public static var label: Font { .system(size: 10, weight: .semibold) }
 
     public static let popoverWidth: CGFloat = 360
-    public static let popoverMaxHeight: CGFloat = 480
+    /// Total popover content height — width AND height are both fixed so
+    /// `NSPopover` never resizes/repositions/clips as content changes
+    /// (round-2 fix). Deliberately NOT a `maxHeight` on some inner scroll
+    /// view: the OUTER frame is what `NSHostingController` reports to
+    /// `NSPopover`, so only fixing that outer frame stops the popover
+    /// itself from moving. Content shorter than this stays top-aligned
+    /// rather than stretching (see `PopoverView`/`PagedPopoverView`).
+    public static let popoverHeight: CGFloat = 540
 }
