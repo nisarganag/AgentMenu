@@ -11,6 +11,10 @@ public struct PreferencesView: View {
     @State private var notificationsOn: Bool
     @State private var mutedKinds: Set<AgentKind>
     @State private var budgetText: String
+    // Round 2 Fix 3: only holds kinds the user has actually touched — a kind
+    // absent here still displays ON (see the `?? true` in the Toggle below)
+    // but remains eligible for auto-hide. See `AgentVisibilityPreference`.
+    @State private var agentVisibility: [AgentKind: Bool]
     @Environment(\.colorScheme) private var scheme
     private var dark: Bool { scheme == .dark }
 
@@ -22,6 +26,7 @@ public struct PreferencesView: View {
         _mutedKinds = State(initialValue: notifier.mutedKinds)
         let saved = UserDefaults.standard.integer(forKey: PreferencesView.budgetKey)
         _budgetText = State(initialValue: saved > 0 ? String(saved) : "")
+        _agentVisibility = State(initialValue: AgentVisibilityPreference.all)
     }
 
     public var body: some View {
@@ -36,6 +41,28 @@ public struct PreferencesView: View {
                 }
             Text(loginNote).font(Theme.activity)
                 .foregroundStyle(Theme.textTertiary(dark: dark))
+
+            Divider()
+
+            // Round 2 Fix 3: all three default to ON (`?? true`) whether or
+            // not the user has ever touched them — a kind an agent has
+            // genuinely never used still auto-hides on its own, but the
+            // toggle itself never displays as "off" just because nothing has
+            // happened yet.
+            Text("SHOW AGENTS").font(Theme.label)
+                .foregroundStyle(Theme.textTertiary(dark: dark))
+            ForEach(AgentKind.allCases, id: \.self) { kind in
+                Toggle(kind.displayName, isOn: Binding(
+                    get: { agentVisibility[kind] ?? true },
+                    set: { on in
+                        agentVisibility[kind] = on
+                        AgentVisibilityPreference.setExplicit(kind, on)
+                    }))
+            }
+            Text("An agent you've never used is hidden automatically until it has a session to show.")
+                .font(Theme.activity)
+                .foregroundStyle(Theme.textTertiary(dark: dark))
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 

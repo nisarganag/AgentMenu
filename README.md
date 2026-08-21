@@ -10,7 +10,7 @@
   <img alt="platform macOS 14+" src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey">
   <img alt="universal binary" src="https://img.shields.io/badge/arch-universal%20(arm64%20%2B%20x86__64)-blue">
   <img alt="Swift 6.0" src="https://img.shields.io/badge/Swift-6.0-orange">
-  <img alt="155 tests passing" src="https://img.shields.io/badge/tests-155%20passing-success">
+  <img alt="239 tests passing" src="https://img.shields.io/badge/tests-239%20passing-success">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -19,7 +19,7 @@ A macOS menu bar app that tells you what your AI coding agents are doing — and
 If you run **Claude Code**, **Codex**, and **opencode** across several terminals, VS Code windows and apps, you lose track of which one is working, which one finished ten minutes ago, and which one has been sitting on a permission prompt you never saw. AgentMenu puts all of it in one place.
 
 ```text
-Since launch  $4.82   last 5h  2.4M tok                        ⚙
+Today  $4.82          last 5h  137k tok                        ⚙
 ────────────────────────────────────────────────────────────────
 CLAUDE CODE
 ┃ ●  ezeeabanotes  ⌥ business-insightaba      NEEDS PERMISSION
@@ -48,7 +48,7 @@ confirmed permission block, amber for an inferred one.
 
 ## Install
 
-Download `AgentMenu-1.1.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.2.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -134,6 +134,8 @@ Push is authoritative for *state*, pull for *numbers*. If a "permission resolved
 - **Rate-limit or quota percentages.** Neither Claude Code nor Codex persists quota state to disk (`rateLimits` is `null` in every transcript). Any "62% of your weekly limit" would be invented. Instead you get *absolute* rolling burn — tokens in the last 5 hours — computed exactly. Set your own budget in Preferences and a percentage appears against *that*.
 - **Costs for models it doesn't know.** An unpriced model shows `—`, never `$0.00`. Prices live in a user-editable `pricing.json` inside the app bundle; add a model and the cost appears.
 - **Context meters without a known window.** No window, no bar — rather than a bar against a guessed size.
+- **Cache-read tokens in the headline count.** The displayed token figure is input + output only. Cache reads are re-reads of context already counted once and dominate the raw total — measured 92% of it on a real cache-heavy day — so including them would make the number alarming and useless. Cost still prices them correctly at 0.1x.
+- **A quota percentage you haven't hit yet.** If AgentMenu has never seen you actually rate-limited, it shows no percentage. Once it observes a real limit it will show one, measured against that.
 
 The rule throughout: an unknown number renders as absent, never as a plausible-looking lie.
 
@@ -146,9 +148,9 @@ Full Xcode is not required — Command Line Tools are enough.
 ```bash
 git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
-swift test          # 155 tests
+swift test          # 239 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.1.0.dmg
+make dmg            # dist/AgentMenu-1.2.0.dmg
 make install        # copy to /Applications
 ```
 

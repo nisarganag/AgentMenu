@@ -3,11 +3,13 @@ import AgentMenuCore
 
 /// Replaces the old single scrollable list (bugs: reshuffling under the
 /// cursor, scroll position snapping to the top) with one horizontally-paged
-/// container holding exactly three pages — Claude Code, Codex, opencode, in
-/// that fixed order, always, even when an agent has no sessions at all. Each
-/// page keeps `sortedForDisplay()` ordering and scrolls vertically on its
-/// own, so a state-driven reshuffle is now confined to one agent's handful
-/// of rows instead of all sessions across every agent at once.
+/// container holding one page per VISIBLE agent (Round 2 Fix 3 — Claude
+/// Code, Codex, opencode were always exactly three pages before; a user who
+/// has never touched one of the three, or has explicitly hidden it in
+/// Preferences, no longer gets a permanently empty page and a dead swipe for
+/// it). Each page keeps `sortedForDisplay()` ordering and scrolls vertically
+/// on its own, so a state-driven reshuffle is confined to one agent's
+/// handful of rows instead of all sessions across every agent at once.
 ///
 /// Uses `ScrollView(.horizontal)` + `.scrollTargetLayout()` +
 /// `.scrollTargetBehavior(.paging)` + `.scrollPosition(id:)` — all part of
@@ -23,11 +25,6 @@ public struct PagedPopoverView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var dark: Bool { scheme == .dark }
-
-    /// Fixed order per the owner's ask. Always these three, always in this
-    /// order — a missing page would make the indicator dots lie about where
-    /// you are.
-    static let pages: [AgentKind] = [.claudeCode, .codex, .opencode]
 
     public init(model: AppViewModel) { self.model = model }
 
@@ -59,34 +56,82 @@ public struct PagedPopoverView: View {
     }
 
     public var body: some View {
+        // Round 2 Fix 3: `pages` is `model.visibleAgentKinds` — an explicit
+        // Preferences toggle, or the auto-hide-if-never-seen rule when
+        // untouched. Read once per body evaluation so the ScrollView, the
+        // dots, and the empty-state branch below can never disagree about
+        // what "visible" means on this particular render.
+        let pages = model.visibleAgentKinds
         VStack(spacing: 0) {
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 0) {
-                    ForEach(Self.pages, id: \.self) { kind in
-                        AgentPageView(kind: kind, sessions: sessions(for: kind),
-                                      model: model, dark: dark, reduceMotion: reduceMotion)
-                            .frame(width: Theme.popoverWidth)
-                            .id(kind)
+            if pages.isEmpty {
+                allAgentsHiddenState
+            } else {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 0) {
+                        ForEach(pages, id: \.self) { kind in
+                            AgentPageView(kind: kind, sessions: sessions(for: kind),
+                                          model: model, dark: dark, reduceMotion: reduceMotion)
+                                .frame(width: Theme.popoverWidth)
+                                .id(kind)
+                        }
                     }
+                    .scrollTargetLayout()
                 }
-                .scrollTargetLayout()
-            }
-            .scrollTargetBehavior(.paging)
-            .scrollPosition(id: pageBinding)
-            // .never, not .hidden: `.hidden` is advisory and is overridden when
-            // the user sets "Show scroll bars: Always" in System Settings, which
-            // leaves a bar sitting across the bottom of the popover. The three
-            // page dots are the paging affordance; a scrollbar is noise.
-            .scrollIndicators(.never)
-            .frame(maxHeight: .infinity)
+                .scrollTargetBehavior(.paging)
+                .scrollPosition(id: pageBinding)
+                // .never, not .hidden: `.hidden` is advisory and is overridden when
+                // the user sets "Show scroll bars: Always" in System Settings, which
+                // leaves a bar sitting across the bottom of the popover. The page
+                // dots are the paging affordance; a scrollbar is noise.
+                .scrollIndicators(.never)
+                .frame(maxHeight: .infinity)
 
-            pageDots
+                // Degenerate case: exactly one visible agent has nothing to
+                // page between, so the dots would be a single inert circle
+                // that can never be anything but "current" — worse than no
+                // affordance at all, since it looks like paging is possible.
+                if pages.count > 1 {
+                    pageDots(pages)
+                }
+            }
         }
+        // Round 2 Fix 3: `currentPage` can drift outside `pages` — the user
+        // hides the page they were on, or an agent auto-hides out from under
+        // them (its last session ages out of the lookback window with the
+        // toggle still untouched). `.scrollPosition(id:)` pointing at an id
+        // with no matching page is exactly the "dot maps to no page" bug
+        // class this fix must not introduce, so both the initial appearance
+        // and every subsequent change to `pages` re-validate it.
+        .onAppear { ensureCurrentPageIsVisible(pages) }
+        .onChange(of: pages) { _, newPages in ensureCurrentPageIsVisible(newPages) }
     }
 
-    private var pageDots: some View {
+    private func ensureCurrentPageIsVisible(_ pages: [AgentKind]) {
+        guard !pages.isEmpty, !pages.contains(model.currentPage) else { return }
+        model.currentPage = pages[0]
+    }
+
+    private var allAgentsHiddenState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 22))
+                .foregroundStyle(Theme.textTertiary(dark: dark))
+            Text("All agents hidden")
+                .font(Theme.project)
+                .foregroundStyle(Theme.textPrimary(dark: dark))
+            Text("Enable at least one agent in Preferences to see its sessions here.")
+                .font(Theme.activity)
+                .foregroundStyle(Theme.textSecondary(dark: dark))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 28)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+
+    private func pageDots(_ pages: [AgentKind]) -> some View {
         HStack(spacing: 2) {
-            ForEach(Self.pages, id: \.self) { kind in
+            ForEach(pages, id: \.self) { kind in
                 PageDotView(kind: kind, isCurrent: model.currentPage == kind,
                             attention: attention(for: kind), dark: dark) {
                     jump(to: kind)

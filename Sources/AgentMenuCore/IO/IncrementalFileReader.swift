@@ -13,6 +13,31 @@ public struct IncrementalFileReader: Sendable {
 
     public init(url: URL) { self.url = url }
 
+    /// Resume tailing from a known-good offset — Round 3 (Ruling F49): the
+    /// caller (`ClaudeCodeSource`/`CodexSource`) is responsible for having
+    /// already verified this offset is safe to trust (the file's current
+    /// size/mtime still match a persisted stamp). `carry` starts empty
+    /// deliberately: a checkpointed offset is always
+    /// `safeResumeOffset` — a complete-line boundary — never a raw
+    /// mid-partial-line position, so there is no pending fragment to seed.
+    public init(url: URL, offset: UInt64) {
+        self.url = url
+        self.offset = offset
+    }
+
+    /// The offset as of the last COMPLETE line, i.e. `offset` minus whatever
+    /// unterminated trailing fragment is sitting in `carry`. Always safe to
+    /// resume from with a fresh (empty) `carry`: the bytes from here to the
+    /// real end of file, re-read in full, exactly reproduce `carry` followed
+    /// by anything appended since. Persisting raw `offset` instead would
+    /// silently drop `carry`'s bytes forever — a very real case, not a
+    /// theoretical one: "agents append to their transcripts while we read,
+    /// so reads land mid-line constantly" (see this type's own doc comment).
+    public var safeResumeOffset: UInt64 {
+        let carryCount = UInt64(carry.count)
+        return offset >= carryCount ? offset - carryCount : 0
+    }
+
     public mutating func readNewLines() -> [Data] {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }

@@ -32,8 +32,15 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
         item.button?.action = #selector(togglePopover)
         item.button?.target = self
         statusItem = item
-        updateIcon(attention: 0, inferredAttention: 0, activeKinds: [])
+        updateIcon(inferredAttention: 0, activeKinds: [], exactAttentionProjects: [])
     }
+
+    /// Whether the popover is currently on screen.
+    ///
+    /// The caller uses this to skip refreshing the observable model while hidden:
+    /// the SwiftUI tree stays instantiated behind a closed popover, so mutating
+    /// the model re-renders something nobody can see.
+    public var isPopoverShown: Bool { popover.isShown }
 
     @objc private func togglePopover() {
         guard let button = statusItem?.button else { return }
@@ -55,14 +62,23 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
 
     /// Composites the glyph, the attention badge, and the live-agent pips.
     ///
-    /// `attention` and `inferredAttention` are kept as two separate counts
-    /// (Fix 3 / review Ruling F61), not merged before reaching this method:
-    /// this is the app's only surface visible with the popover closed, so it
-    /// must never render a Codex stall guess with the same alert-red badge
-    /// as a fact-backed Claude permission prompt. An exact hit always wins
-    /// the badge colour when both are present — it is strictly more
-    /// actionable than a guess.
-    public func updateIcon(attention: Int, inferredAttention: Int, activeKinds: [AgentKind]) {
+    /// `exactAttentionProjects` and `inferredAttention` are kept as two
+    /// separate signals (Fix 3 / review Ruling F61), never merged before
+    /// reaching this method: this is the app's only surface visible with
+    /// the popover closed, so it must never render a Codex stall guess with
+    /// the same alert-red badge as a fact-backed Claude permission prompt.
+    /// An exact hit always wins the badge colour when both are present — it
+    /// is strictly more actionable than a guess. (There is no longer a
+    /// separate exact `attention: Int` — `exactAttentionProjects.count` IS
+    /// that count, and deriving it from one place instead of two numbers
+    /// that merely ought to agree is what actually guarantees they can't
+    /// drift apart.)
+    ///
+    /// Round 2 Fix 4: `exactAttentionProjects` additionally names what's
+    /// blocked, without opening the popover — see `overlay(...)` below for
+    /// why this is scoped to exact confidence only.
+    public func updateIcon(inferredAttention: Int, activeKinds: [AgentKind],
+                           exactAttentionProjects: [String]) {
         guard let button = statusItem?.button else { return }
         let size = NSSize(width: 20, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
@@ -92,21 +108,45 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
         // Colour cannot live in a template image, so the badge and pips are a
         // separate non-template overlay drawn as the button's attributed title.
         button.imagePosition = .imageLeading
-        button.attributedTitle = overlay(attention: attention, inferredAttention: inferredAttention,
-                                         kinds: activeKinds)
+        button.attributedTitle = overlay(inferredAttention: inferredAttention,
+                                         kinds: activeKinds, exactAttentionProjects: exactAttentionProjects)
+        // Round 2 Fix 4: the full name is still available on hover even when
+        // the title itself had to truncate it.
+        button.toolTip = exactAttentionProjects.count == 1 ? exactAttentionProjects[0] : nil
     }
 
-    private func overlay(attention: Int, inferredAttention: Int, kinds: [AgentKind]) -> NSAttributedString {
+    private func overlay(inferredAttention: Int, kinds: [AgentKind],
+                         exactAttentionProjects: [String]) -> NSAttributedString {
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let result = NSMutableAttributedString()
-        if attention > 0 {
+        if !exactAttentionProjects.isEmpty {
             result.append(NSAttributedString(string: " ●", attributes: [
                 .foregroundColor: NSColor(Theme.alert(dark: dark)),
                 .font: NSFont.systemFont(ofSize: 9),
             ]))
+            // Round 2 Fix 4: name a single blocked session outright; fall
+            // back to a count once there's more than one, so glancing at the
+            // menu bar can tell you WHETHER to even look, not just THAT
+            // something's pending. Deliberately gated on exact attention
+            // only — an `.inferred`-only guess (the branch below) never
+            // reaches this text at all, which is how "the existing
+            // exact/inferred distinction survives into this text": extending
+            // "name what's blocked" wording to a guess that might not be
+            // blocked at all would describe it with a certainty it doesn't
+            // have.
+            let label = exactAttentionProjects.count == 1
+                ? " " + Self.truncate(exactAttentionProjects[0])
+                : " \(exactAttentionProjects.count)"
+            result.append(NSAttributedString(string: label, attributes: [
+                .foregroundColor: NSColor(Theme.alert(dark: dark)),
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            ]))
         } else if inferredAttention > 0 {
             // A guess, not a fact (Fix 3) — caution amber, never alert red,
-            // so the badge cannot claim more certainty than the row itself does.
+            // so the badge cannot claim more certainty than the row itself
+            // does. No appended text either (Fix 4): the title returns to
+            // just the glyph and pips, exactly as when nothing needs
+            // attention — only the dot's colour signals "maybe."
             result.append(NSAttributedString(string: " ●", attributes: [
                 .foregroundColor: NSColor(Theme.caution(dark: dark)),
                 .font: NSFont.systemFont(ofSize: 9),
@@ -120,5 +160,14 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
             }
         }
         return result
+    }
+
+    /// The menu bar is scarce (Fix 4); a single very long project name must
+    /// not push the rest of the menu bar off-screen. `String.prefix` counts
+    /// `Character` (grapheme clusters), so this can never split an emoji or
+    /// combining sequence mid-way.
+    private static func truncate(_ s: String, maxLength: Int = 18) -> String {
+        guard s.count > maxLength else { return s }
+        return String(s.prefix(maxLength - 1)) + "…"
     }
 }

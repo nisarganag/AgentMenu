@@ -12,6 +12,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesWindow: NSWindow?
 
     private var sources: [any AgentSource] = []
+    // Round 3 (Ruling F49): kept as concrete-typed references, alongside the
+    // generic `sources` array above, purely so `saveCheckpoint` can call
+    // their kind-specific `checkpointState(now:)` — that method isn't (and
+    // shouldn't be) part of the shared `AgentSource` protocol, since
+    // OpencodeSource needs no equivalent at all (it reads a database, not an
+    // append-only log) and must stay untouched.
+    private var claudeSource: ClaudeCodeSource!
+    private var codexSource: CodexSource!
     private var spool: SpoolWatcher!
     private var scanner = ProcessScanner()
     // OpencodeSource already declares its own poll cadence
@@ -67,6 +75,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // header's burn/cost figures without bound within minutes (round-2 fix
     // report, Finding 1 — CRITICAL).
     private var recordedTotals: [String: (tokens: Int, cost: Double)] = [:]
+    // Round 2 Fix 2: session ids currently armed-and-not-yet-warned for a
+    // context-fill crossing (ContextWarnings' doc comment). In-memory only,
+    // like `recordedTotals` above — a relaunch starts fresh rather than
+    // persisting across restarts, so this deliberately does not live in
+    // `Checkpoint`. That is a real, considered choice, not an oversight: a
+    // session already sitting above 80% at the moment of a relaunch (which
+    // happens often during active development of this very app) is still
+    // useful, actionable information, not a stale repeat — unlike a spool
+    // event banner, there is no earlier "this exact banner already fired"
+    // fact being re-asserted, just the session's CURRENT fill, which is
+    // just as true after a relaunch as before it.
+    private var contextWarningsArmed: Set<String> = []
     private var installer: HookInstaller!
     private var timer: DispatchSourceTimer?
     private var activityToken: NSObjectProtocol?
@@ -110,11 +130,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             codexConfig: home.appendingPathComponent(".codex/config.toml"),
             scriptsDir: scriptsDir)
 
+        // Round 3 (Ruling F49): each file-based source is seeded with
+        // whatever this checkpoint already has for it — the offset AND the
+        // accumulator that produced it, never the offset alone. A source
+        // whose checkpoint is empty (first-ever launch, or a version bump
+        // that discarded everything) just falls back to its existing
+        // from-zero behaviour per path, unchanged.
+        claudeSource = ClaudeCodeSource(projectsRoot: home.appendingPathComponent(".claude/projects"),
+                                        pricing: pricing, checkpoint: checkpoint.claudeTranscripts)
+        codexSource = CodexSource(sessionsRoot: home.appendingPathComponent(".codex/sessions"),
+                                  pricing: pricing, checkpoint: checkpoint.codexTranscripts)
         sources = [
-            ClaudeCodeSource(projectsRoot: home.appendingPathComponent(".claude/projects"),
-                             pricing: pricing),
-            CodexSource(sessionsRoot: home.appendingPathComponent(".codex/sessions"),
-                        pricing: pricing),
+            claudeSource,
+            codexSource,
             OpencodeSource(dbPath: home.appendingPathComponent(
                 ".local/share/opencode/opencode.db").path, pricing: pricing),
         ]
@@ -285,13 +313,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for e in events { notifier.handle(e, now: now) }
         }
 
-        model.refresh(now: now)
-        let liveKinds = Array(Set(model.sessions.compactMap { s -> AgentKind? in
+        // Feature 2: fold in any NEW real Claude rate-limit event as an
+        // observed ceiling. Scoped to Claude only — the signal
+        // (`apiErrorStatus == 429`) and the quota it measures are both
+        // Claude-specific. Reads `store.all` fresh rather than
+        // `model.sessions` because `model.refresh()` (which sets the
+        // latter) has not run yet this tick — `observedCeiling` must be in
+        // place BEFORE it does, so `rateLimitFraction` reflects this tick's
+        // value rather than lagging one tick behind.
+        let claudeSessions = store.all.filter { $0.kind == .claudeCode }
+        let claudeBurn5h = claudeSessions.compactMap(\.tokensLast5h).reduce(0) { $0 + $1.total }
+        let (ceilings, lastAt) = RateLimitCeiling.recording(
+            rateLimitTimestamps: claudeSessions.compactMap(\.lastRateLimitAt), now: now,
+            burn5h: claudeBurn5h,
+            previous: (checkpoint.observedCeilings, checkpoint.lastRateLimitObservedAt))
+        if lastAt != checkpoint.lastRateLimitObservedAt {
+            checkpoint.observedCeilings = ceilings
+            checkpoint.lastRateLimitObservedAt = lastAt
+            saveCheckpoint(now: now)   // rare and important — do not wait for the 30s throttle
+        }
+        model.observedCeiling = RateLimitCeiling.conservativeCeiling(checkpoint.observedCeilings)
+
+        // Round 2 Fix 3: cheap (three `FileManager.fileExists` calls) and
+        // set fresh every tick so a user who starts using a new tool mid-run
+        // sees its page auto-appear within one tick, with no relaunch
+        // needed — set before `refresh()` so `visibleAgentKinds` (read from
+        // `PagedPopoverView` immediately after) is never one tick stale.
+        // PERF: the SwiftUI hosting controller stays instantiated even while the
+        // popover is closed, so ANY mutation of this @Observable model re-evaluates
+        // the whole hidden view tree. Profiling the shipped build with the popover
+        // shut put SwiftUICore at the top of the sample and total CPU at ~15.6%,
+        // with zero transcript writes in the window. So while hidden we touch the
+        // model not at all and drive the status item straight from the store; the
+        // full refresh happens on the next tick after it opens, and `togglePopover`
+        // already refreshes immediately before showing.
+        let popoverVisible = statusController?.isPopoverShown ?? false
+        if popoverVisible {
+            // Cheap (three `FileManager.fileExists` calls) and set fresh so a user
+            // who starts using a new tool sees its page appear without a relaunch.
+            // Must precede `refresh()`, which `PagedPopoverView` reads right after.
+            model.dataDirectoryPresent = Set(sources.filter { $0.dataDirectoryExists }.map(\.kind))
+            model.refresh(now: now)
+        }
+
+        // Round 2 Fix 2: warn once per session per crossing of ~80% context
+        // fill — crossing detection itself (the "once, and re-arm on a
+        // drop" rule) is pure and tested in `ContextWarnings`; this is only
+        // the I/O glue that turns a crossing into an actual notification.
+        // Reuses `Notifier.notify` directly (its coalescing window and
+        // per-agent mute both still apply) rather than `.handle(SpoolEvent)`
+        // — this isn't a hook event, it's a computed threshold crossing.
+        // Read the store, not the model: these must keep firing while the popover
+        // is closed, which is exactly when the model is deliberately not refreshed.
+        let storeSessions = store.all
+        for s in ContextWarnings.crossed(storeSessions, armed: &contextWarningsArmed) {
+            let percent = Int((s.context?.fraction ?? 0) * 100)
+            notifier.notify(kind: s.kind,
+                            title: "\(s.project) is near its context limit",
+                            body: "\(percent)% of context used — consider compacting soon.",
+                            key: "\(s.id)/context80", now: now)
+        }
+
+        let liveKinds = Array(Set(storeSessions.compactMap { s -> AgentKind? in
             if case .working = s.state { return s.kind } else { return nil }
         })).sorted { $0.rawValue < $1.rawValue }
-        statusController?.updateIcon(attention: model.attentionCount,
-                                     inferredAttention: model.inferredAttentionCount,
-                                     activeKinds: liveKinds)
+        statusController?.updateIcon(inferredAttention: store.inferredAttentionCount,
+                                     activeKinds: liveKinds,
+                                     exactAttentionProjects: storeSessions.exactAttentionProjects)
 
         // Throttled: this runs every 2s, but the checkpoint only needs to be
         // durable enough that a crash loses seconds, not history.
@@ -313,6 +401,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // for the process lifetime; prune uses the same staleness cutoff as the
         // checkpoint itself so both agree on what "too old to matter" means.
         notifier.prune(before: cutoff)
+        // Round 3 (Ruling F49): refresh every transcript's accumulator +
+        // offset + validity stamp on every save (throttled to 30s / on
+        // terminate, same as everything else here) so the NEXT launch can
+        // resume instead of replaying. `checkpointSnapshot` inside each
+        // source already trims what doesn't need to survive the round trip,
+        // so this stays cheap even for a chatty session.
+        checkpoint.claudeTranscripts = claudeSource.checkpointState(now: now)
+        checkpoint.codexTranscripts = codexSource.checkpointState(now: now)
         try? checkpoints.save(checkpoint)
     }
 
@@ -334,7 +430,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPreferences() {
         if preferencesWindow == nil {
-            let w = NSWindow(contentRect: .init(x: 0, y: 0, width: 340, height: 380),
+            // Height bumped for Round 2 Fix 3's new "SHOW AGENTS" section
+            // (a label, three toggles, and an explanatory line). Not
+            // `.resizable`, so this has to fit the content up front rather
+            // than relying on the user dragging it taller.
+            let w = NSWindow(contentRect: .init(x: 0, y: 0, width: 340, height: 470),
                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
             w.title = "AgentMenu Preferences"
             w.contentViewController = NSHostingController(

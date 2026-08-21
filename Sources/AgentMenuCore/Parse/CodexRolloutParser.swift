@@ -5,8 +5,17 @@ import Foundation
 /// Codex never logs approval requests (verified across every rollout on disk),
 /// so "blocked on permission" is a stall heuristic reported at `.inferred`
 /// confidence. See spec §3.2 — do not upgrade this to `.exact`.
-public struct CodexRolloutParser: Sendable {
+///
+/// `Codable`, `Equatable` (Round 3 / Ruling F49): see
+/// `ClaudeTranscriptParser`'s equivalent doc comment — the same
+/// offset-plus-accumulator reasoning applies here, keyed off
+/// `checkpointVersion` rather than shared with Claude's.
+public struct CodexRolloutParser: Sendable, Codable, Equatable {
     public static let stallThreshold: TimeInterval = 25
+
+    /// See `ClaudeTranscriptParser.checkpointVersion` — same discipline,
+    /// independent counter (Claude and Codex accumulators evolve separately).
+    public static let checkpointVersion = 1
 
     private var id: String?
     private var cwd: String?
@@ -19,8 +28,37 @@ public struct CodexRolloutParser: Sendable {
     private var terminal: Date?          // task_complete / turn_aborted
     private var firstAt: Date?
     private var lastAt: Date?
+    /// One entry per `token_count` event's `last_token_usage` — verified
+    /// against real rollouts to be an EXACT non-overlapping per-request
+    /// delta (summed across a session it reconstructs `total_token_usage`
+    /// exactly, no drift), unlike `total_token_usage` which is cumulative.
+    /// This is both the precise per-message contribution for calendar-day
+    /// windowing (Feature 1) and the precise per-request input size OpenAI's
+    /// long-context surcharge keys off (Feature 3) — `rawInput` keeps the
+    /// cache-inclusive figure for the threshold check, since the surcharge is
+    /// about total prompt size, not the cache/non-cache split.
+    private struct RequestUsage: Sendable, Codable, Equatable {
+        let at: Date; let tokens: TokenStats; let rawInput: Int
+    }
+    private var requestLog: [RequestUsage] = []
 
     public init() {}
+
+    /// See `ClaudeTranscriptParser.foldedUsageCount` — same purpose, applied
+    /// to `requestLog` instead of `usageLog`.
+    public var foldedRequestCount: Int { requestLog.count }
+
+    /// See `ClaudeTranscriptParser.checkpointSnapshot(now:)` — identical
+    /// reasoning and identical monotonic-cutoff safety proof, applied to
+    /// `requestLog` instead of `usageLog`.
+    public func checkpointSnapshot(now: Date) -> CodexRolloutParser {
+        let todayStart = Calendar.current.startOfDay(for: now)
+        let fiveHoursAgo = now.addingTimeInterval(-5 * 3600)
+        let cutoff = min(todayStart, fiveHoursAgo)
+        var copy = self
+        copy.requestLog = requestLog.filter { $0.at >= cutoff }
+        return copy
+    }
 
     public mutating func consume(_ line: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
@@ -70,6 +108,21 @@ public struct CodexRolloutParser: Sendable {
             }
             if let last = info["last_token_usage"] as? [String: Any] {
                 contextUsed = last["total_tokens"] as? Int
+                // Same raw-includes-cached convention as `total_token_usage`
+                // above (verified: subtracting cached_input_tokens from
+                // input_tokens and adding output_tokens reproduces total_tokens
+                // exactly on real per-request snapshots).
+                let rawInput = last["input_tokens"] as? Int ?? 0
+                let cached   = last["cached_input_tokens"] as? Int ?? 0
+                let entry = TokenStats(
+                    input: max(0, rawInput - cached),
+                    output: last["output_tokens"] as? Int ?? 0,
+                    cacheRead: cached,
+                    cacheWrite: last["cache_write_input_tokens"] as? Int ?? 0,
+                    reasoning: last["reasoning_output_tokens"] as? Int ?? 0)
+                if let at {
+                    requestLog.append(RequestUsage(at: at, tokens: entry, rawInput: rawInput))
+                }
             }
             if let w = info["model_context_window"] as? Int { contextWindow = w }
 
@@ -104,7 +157,49 @@ public struct CodexRolloutParser: Sendable {
         }
     }
 
-    public func session(path: String, now: Date) -> AgentSession? {
+    /// Sum of every logged request's usage at or after `cutoff`.
+    private func usage(since cutoff: Date) -> TokenStats {
+        requestLog.filter { $0.at >= cutoff }.map(\.tokens).reduce(TokenStats(), +)
+    }
+
+    /// Session cost as the SUM of each individual request's cost, so Feature
+    /// 3's long-context surcharge — which applies above a per-request input
+    /// threshold — is priced against the request that actually crossed it,
+    /// never smeared across the session's cumulative total (which has no way
+    /// to know which portion came from an over-threshold request). When no
+    /// request ever crosses a threshold this is mathematically identical to
+    /// pricing the cumulative total in one shot, since `requestLog` entries
+    /// are exact non-overlapping deltas that sum to it (verified against real
+    /// rollouts) — so this is a drop-in replacement, not just an addition.
+    /// `since` restricts the sum to a window (`costToday`); omit it for the
+    /// whole-session figure. Returns nil only when the model itself is
+    /// unpriced — a window with no requests in it is a real zero, not unknown.
+    private func cost(pricing: PricingTable, model: String, since cutoff: Date) -> Double? {
+        guard pricing.cost(for: TokenStats(), model: model) != nil else { return nil }
+        var total = 0.0
+        for entry in requestLog where entry.at >= cutoff {
+            total += pricing.cost(for: entry.tokens, model: model, requestInputTokens: entry.rawInput) ?? 0
+        }
+        return total
+    }
+
+    public func cost(pricing: PricingTable, model: String) -> Double? {
+        cost(pricing: pricing, model: model, since: .distantPast)
+    }
+
+    public func costToday(pricing: PricingTable, model: String, now: Date) -> Double? {
+        cost(pricing: pricing, model: model, since: Calendar.current.startOfDay(for: now))
+    }
+
+    /// - Parameter precomputedWindow: see
+    ///   `ClaudeTranscriptParser.session(path:now:precomputedWindow:)` —
+    ///   identical contract, applied to `requestLog` instead of `usageLog`.
+    ///   `nil` (the default; every existing call site including every test)
+    ///   always computes fresh and is exact by construction.
+    public func session(path: String, now: Date,
+                         precomputedWindow: (tokensToday: TokenStats, tokensLast5h: TokenStats)? = nil)
+        -> AgentSession?
+    {
         guard let id, let lastAt else { return nil }
         let dir = cwd ?? ""
 
@@ -126,6 +221,20 @@ public struct CodexRolloutParser: Sendable {
             state = .idle
         }
 
+        let tokensToday: TokenStats
+        let tokensLast5h: TokenStats
+        if let precomputedWindow {
+            tokensToday = precomputedWindow.tokensToday
+            tokensLast5h = precomputedWindow.tokensLast5h
+        } else {
+            // "Today" is local midnight on the user's current calendar —
+            // never UTC, never a rolling 24h window (Feature 1).
+            let todayStart = Calendar.current.startOfDay(for: now)
+            let fiveHoursAgo = now.addingTimeInterval(-5 * 3600)
+            tokensToday = usage(since: todayStart)
+            tokensLast5h = usage(since: fiveHoursAgo)
+        }
+
         return AgentSession(
             kind: .codex,
             nativeId: id,
@@ -136,6 +245,8 @@ public struct CodexRolloutParser: Sendable {
             state: state,
             lastActivity: lastActivity,
             tokens: tokens,
+            tokensToday: tokensToday,
+            tokensLast5h: tokensLast5h,
             context: zip2(contextUsed, contextWindow).map(ContextFill.init),
             cost: nil,                        // filled by the source using PricingTable
             startedAt: firstAt ?? lastAt,

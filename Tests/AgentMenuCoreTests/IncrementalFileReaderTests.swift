@@ -48,6 +48,51 @@ private func append(_ s: String, to url: URL) throws {
     #expect(r.readNewLines().isEmpty)
 }
 
+// MARK: - Round 3: resuming from a checkpointed offset (Ruling F49)
+
+@Test func initWithOffsetResumesReadingFromThatByteOnward() throws {
+    let url = try tempFile("one\ntwo\nthr")   // "thr" is a partial trailing line
+    // Simulate a checkpoint taken after "one\n" was already read (offset 4),
+    // with a fresh (empty) carry — exactly what `safeResumeOffset` produces.
+    var r = IncrementalFileReader(url: url, offset: 4)
+    #expect(r.readNewLines().map { String(decoding: $0, as: UTF8.self) } == ["two"])
+    #expect(r.offset == 11)   // whole file read; "thr" held back as a partial line
+}
+
+@Test func safeResumeOffsetExcludesAnUnterminatedTrailingFragment() throws {
+    let url = try tempFile("full\npar")   // "par" has no newline yet
+    var r = IncrementalFileReader(url: url)
+    _ = r.readNewLines()
+    // offset has advanced past "par" (it was read into `carry`), but
+    // safeResumeOffset must point BEFORE it — the last complete-line
+    // boundary — or a checkpoint taken here would permanently drop "par"'s
+    // eventual continuation.
+    #expect(r.offset == 8)
+    #expect(r.safeResumeOffset == 5, "must exclude the 3 bytes of the unterminated \"par\" fragment")
+}
+
+@Test func resumingFromSafeResumeOffsetNeverLosesAPartialLineSplitAcrossACheckpoint() throws {
+    // The exact scenario `safeResumeOffset` exists for: a checkpoint is taken
+    // while a line is still mid-write, and the rest of that line arrives
+    // only after "relaunch".
+    let url = try tempFile("full\nPARTIAL")
+    var live = IncrementalFileReader(url: url)
+    #expect(live.readNewLines().map { String(decoding: $0, as: UTF8.self) } == ["full"])
+    let checkpointedOffset = live.safeResumeOffset   // points BEFORE "PARTIAL"
+
+    // "Relaunch": a fresh reader seeded only with the checkpointed offset —
+    // no in-memory `carry` survives a process restart.
+    var resumed = IncrementalFileReader(url: url, offset: checkpointedOffset)
+    // Nothing has been appended yet: the previously-partial line is not a
+    // complete line, so nothing new is emitted (it is re-buffered as carry).
+    #expect(resumed.readNewLines().isEmpty)
+
+    try append("_MORE\n", to: url)
+    // The full, uncorrupted line must appear now — not a truncated
+    // "_MORE" missing its "PARTIAL" prefix.
+    #expect(resumed.readNewLines().map { String(decoding: $0, as: UTF8.self) } == ["PARTIAL_MORE"])
+}
+
 @Test func offsetAdvancesByBytesConsumedNotStaleSizeProbe() throws {
     // Concurrency test: agent appends between size probe and read.
     // Old code would set offset = size (stale probe), causing re-emission.

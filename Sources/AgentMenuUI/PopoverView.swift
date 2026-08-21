@@ -22,12 +22,15 @@ public struct PopoverView: View {
     public var body: some View {
         VStack(spacing: 0) {
             HeaderView(todayCost: model.todayCost, burn5h: model.burn5h,
-                       burnFraction: model.burnFraction, onPreferences: onPreferences)
+                       burnFraction: model.burnFraction, figuresPartial: model.figuresPartial,
+                       rateLimitFraction: model.rateLimitFraction, onPreferences: onPreferences)
             Divider().overlay(Theme.hairline(dark: dark))
 
-            // Always three pages (Claude Code, Codex, opencode), horizontally
-            // paged, each scrolling vertically on its own — round-2 fix for
-            // the single list's scrollbar jitter / scroll-to-top / clipping.
+            // One page per VISIBLE agent (Round 2 Fix 3 — see
+            // `AppViewModel.visibleAgentKinds`; can be 0-3 pages), each
+            // horizontally paged and scrolling vertically on its own —
+            // round-2 fix for the single list's scrollbar jitter /
+            // scroll-to-top / clipping.
             PagedPopoverView(model: model)
                 .frame(maxHeight: .infinity)
 

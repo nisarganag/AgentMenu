@@ -30,11 +30,36 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
     // timestamp quantization, so pairing it with mtime closes that gap for
     // free (round-2 fix report, Finding 2).
     private var lastSeen: [String: (mtime: Date, size: Int)] = [:]
+    // path -> the last (foldedUsageCount, coarsened-now bucket) a
+    // tokensToday/tokensLast5h pair was actually DERIVED for, plus that
+    // pair. `rescan` calls `session(path:now:)` every ~2s for every cached
+    // parser regardless of whether its file changed this tick — without
+    // this, a long-lived session re-folds its whole retained usage log
+    // twice (`tokensToday`, `tokensLast5h` are separate scans) every single
+    // tick, for numbers that are almost always identical to last tick's.
+    // Lives here rather than inside `ClaudeTranscriptParser` itself so the
+    // parser's checkpointed shape never changes (no `checkpointVersion`
+    // bump, no risk of a stale cache value ever being persisted) — this is
+    // purely a runtime memoisation of `session`'s own output, keyed on the
+    // two things `AgentSourceTuning.windowCacheGranularity` and
+    // `ClaudeTranscriptParser.foldedUsageCount` say can invalidate it.
+    private var windowCache: [String: (foldedCount: Int, nowBucket: Int64,
+                                        tokensToday: TokenStats, tokensLast5h: TokenStats)] = [:]
     private var watcher: DirectoryWatcher?
+    // Round 3 (Ruling F49): seeded once at init from a loaded `Checkpoint`,
+    // consumed opportunistically the first time each path is encountered by
+    // THIS process (see `rescan`). Never consulted again after that — either
+    // it seeded `parsers`/`readers` or it didn't, and either way `parsers[path]`
+    // is non-nil from then on, which is what actually gates the restore path.
+    // Removed from this dictionary as each entry is considered, so a process
+    // that runs for a while never holds more of this than it still might use.
+    private var pendingRestore: [String: TranscriptCheckpoint<ClaudeTranscriptParser>]
 
-    public init(projectsRoot: URL, pricing: PricingTable) {
+    public init(projectsRoot: URL, pricing: PricingTable,
+                checkpoint: [String: TranscriptCheckpoint<ClaudeTranscriptParser>] = [:]) {
         self.projectsRoot = projectsRoot
         self.pricing = pricing
+        self.pendingRestore = checkpoint
     }
 
     public func start(onChange: @escaping @Sendable () -> Void) {
@@ -59,6 +84,14 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
         let w = watcher
         lock.unlock()
         w?.restart()
+    }
+
+    /// Round 2 Fix 3: existence only, no read of contents — a fresh user who
+    /// has never run Claude Code simply has no `~/.claude/projects` at all.
+    public var dataDirectoryExists: Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: projectsRoot.path, isDirectory: &isDir)
+            && isDir.boolValue
     }
 
     public func rescan(now: Date) -> [AgentSession] {
@@ -128,8 +161,25 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
             let unchanged = mtime != nil && size != nil
                 && lastSeen[path]?.mtime == mtime && lastSeen[path]?.size == size
             if !unchanged {
-                var reader = readers[path] ?? IncrementalFileReader(url: url)
-                var parser = parsers[path] ?? ClaudeTranscriptParser()
+                var reader: IncrementalFileReader
+                var parser: ClaudeTranscriptParser
+                if let existingReader = readers[path], let existingParser = parsers[path] {
+                    reader = existingReader
+                    parser = existingParser
+                } else if let restore = pendingRestore.removeValue(forKey: path),
+                          let mtime, let size,
+                          restore.isValid(currentSize: UInt64(size), currentModifiedAt: mtime) {
+                    // Round 3 (Ruling F49): the offset and the accumulator
+                    // that produced it, restored together — never the
+                    // offset alone with a fresh parser, which would report
+                    // only the tail of this session's tokens.
+                    reader = IncrementalFileReader(url: url, offset: restore.offset)
+                    parser = restore.state
+                } else {
+                    pendingRestore.removeValue(forKey: path)   // drop a stale/invalid entry, if any
+                    reader = IncrementalFileReader(url: url)
+                    parser = ClaudeTranscriptParser()
+                }
                 // `JSONSerialization` is Objective-C-bridged, so parsing one
                 // line allocates a small mountain of short-lived objects.
                 // Draining per line — not per file, not once for the whole
@@ -145,21 +195,68 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
                 if let mtime, let size { lastSeen[path] = (mtime, size) }
             }
 
-            guard var session = parsers[path]?.session(path: path, now: now) else { continue }
+            guard let parser = parsers[path] else { continue }
+            // See `windowCache`'s doc comment: skip re-deriving
+            // tokensToday/tokensLast5h only when NEITHER of the two things
+            // that could change them has — new usage folded in since the
+            // cached pair was computed, or `now` having crossed into a new
+            // coarsened bucket. A miss recomputes exactly, from the real
+            // `now`, inside `session` itself — this only ever decides
+            // whether that recompute is skippable, never what it would
+            // have produced.
+            let windowBucket = AgentSourceTuning.windowCacheBucket(for: now)
+            let foldedCount = parser.foldedUsageCount
+            var precomputedWindow: (tokensToday: TokenStats, tokensLast5h: TokenStats)?
+            if let cached = windowCache[path],
+               cached.foldedCount == foldedCount, cached.nowBucket == windowBucket {
+                precomputedWindow = (cached.tokensToday, cached.tokensLast5h)
+            }
+            guard var session = parser.session(path: path, now: now, precomputedWindow: precomputedWindow)
+            else { continue }
+            // Only re-cache on an actual recompute — a hit already reflects
+            // this exact (foldedCount, bucket) pair, so re-storing it would
+            // just be redundant writes to a dictionary already at that key.
+            if precomputedWindow == nil, let today = session.tokensToday, let last5h = session.tokensLast5h {
+                windowCache[path] = (foldedCount, windowBucket, today, last5h)
+            }
             enrich(&session)
             out.append(session)
         }
-        // Drop every cached reader/parser/(mtime,size) for a path not seen
-        // this pass — aged-out or deleted — or the caches grow for the life
-        // of the process. These stay keyed per FILE regardless of the merge
-        // below: `IncrementalFileReader`/`ClaudeTranscriptParser` are one
-        // real accumulator per file, and the merge only changes what's
-        // handed to the caller, never how the reading itself is cached.
+        // Drop every cached reader/parser/(mtime,size)/windowCache entry for
+        // a path not seen this pass — aged-out or deleted — or the caches
+        // grow for the life of the process. These stay keyed per FILE
+        // regardless of the merge below: `IncrementalFileReader`/
+        // `ClaudeTranscriptParser` are one real accumulator per file, and
+        // the merge only changes what's handed to the caller, never how the
+        // reading itself is cached.
         readers = readers.filter { visited.contains($0.key) }
         parsers = parsers.filter { visited.contains($0.key) }
         lastSeen = lastSeen.filter { visited.contains($0.key) }
+        windowCache = windowCache.filter { visited.contains($0.key) }
         _lastError = walkError
         return Self.merging(out)
+    }
+
+    /// Snapshot of every transcript this process has actually read, ready to
+    /// persist into `Checkpoint.claudeTranscripts` — Round 3 (Ruling F49).
+    /// Only paths present in `parsers`, `readers`, AND `lastSeen` are
+    /// exported: those three are always written together at the bottom of
+    /// `rescan`'s per-file branch, so their intersection is exactly "files
+    /// this process has read at least one line of," which is the same set
+    /// `rescan` itself would otherwise re-read from zero on the next launch.
+    public func checkpointState(now: Date) -> [String: TranscriptCheckpoint<ClaudeTranscriptParser>] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [String: TranscriptCheckpoint<ClaudeTranscriptParser>] = [:]
+        for (path, parser) in parsers {
+            guard let reader = readers[path], let seen = lastSeen[path] else { continue }
+            out[path] = TranscriptCheckpoint(
+                state: parser.checkpointSnapshot(now: now),
+                offset: reader.safeResumeOffset,
+                size: UInt64(seen.size),
+                modifiedAt: seen.mtime,
+                version: ClaudeTranscriptParser.checkpointVersion)
+        }
+        return out
     }
 
     /// A Claude Code subagent transcript reports its PARENT session's
@@ -207,11 +304,27 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
                 total.cacheWrite += s.tokens.cacheWrite
                 total.reasoning  += s.tokens.reasoning
             }
+            // Same "sum what's known, or nil" rule as `cost` just below —
+            // Feature 1's windowed fields are as summable as `tokens` itself
+            // (every member here came from the same parser, which always
+            // sets them), but the group is handled generically rather than
+            // assumed non-nil.
+            merged.tokensToday = group.contains { $0.tokensToday != nil }
+                ? group.compactMap(\.tokensToday).reduce(TokenStats(), +)
+                : nil
+            merged.tokensLast5h = group.contains { $0.tokensLast5h != nil }
+                ? group.compactMap(\.tokensLast5h).reduce(TokenStats(), +)
+                : nil
             // A partial sum is worse than an honest absent value: sum the
             // known costs only if at least one member actually has one.
             merged.cost = group.contains { $0.cost != nil }
                 ? group.reduce(0) { $0 + ($1.cost ?? 0) }
                 : nil
+            merged.costToday = group.contains { $0.costToday != nil }
+                ? group.reduce(0) { $0 + ($1.costToday ?? 0) }
+                : nil
+            // A timestamp, not a quantity: the most recent one wins, never summed.
+            merged.lastRateLimitAt = group.compactMap(\.lastRateLimitAt).max()
             merged.startedAt = group.map(\.startedAt).min()!
             return merged
         }
@@ -223,6 +336,7 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
     private func enrich(_ s: inout AgentSession) {
         guard let model = s.model else { s.context = nil; return }
         s.cost = pricing.cost(for: s.tokens, model: model)
+        s.costToday = s.tokensToday.flatMap { pricing.cost(for: $0, model: model) }
         if let window = pricing.contextWindow(for: model), let used = s.context?.used {
             s.context = ContextFill(used: used, window: window)
         } else {

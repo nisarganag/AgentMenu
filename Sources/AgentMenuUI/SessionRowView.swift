@@ -104,8 +104,16 @@ public struct SessionRowView: View {
                 Text("\(Int(ctx.fraction * 100))%")
                     .font(Theme.mono(10)).foregroundStyle(Theme.textSecondary(dark: dark))
             }
-            Text(Self.compact(session.tokens.total))
+            // Round 2 Fix 1: `workTokens` (input+output), not `.total` — a
+            // long session's cache-read alone can outweigh the tokens it
+            // actually read/wrote by two orders of magnitude (measured
+            // 1.2B vs 5.3M `.total`-vs-`workTokens` on one real session
+            // here), which reads as a plausible-looking lie, not a bigger
+            // number. `.total` is still exactly what `cost` above and the
+            // context meter below are priced/filled from — unchanged.
+            Text(Self.compact(session.tokens.workTokens))
                 .font(Theme.mono(10)).foregroundStyle(Theme.textSecondary(dark: dark))
+                .help("Input + output tokens for this session (\(Self.compact(session.tokens.total)) total including cache read/write, priced separately in the cost figure).")
             Text(session.cost.map { String(format: "$%.2f", $0) } ?? "—")
                 .font(Theme.mono(10)).foregroundStyle(Theme.textSecondary(dark: dark))
             Spacer(minLength: 4)

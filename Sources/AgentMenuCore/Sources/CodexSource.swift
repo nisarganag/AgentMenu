@@ -19,11 +19,33 @@ public final class CodexSource: AgentSource, @unchecked Sendable {
     // both fields (not mtime alone) are needed to safely skip an unchanged
     // file's open/seek/read/parse on a rescan.
     private var lastSeen: [String: (mtime: Date, size: Int)] = [:]
+    // See `ClaudeCodeSource.windowCache` — identical purpose and identical
+    // reasoning for why it lives here rather than inside
+    // `CodexRolloutParser`, applied to `foldedRequestCount` instead of
+    // `foldedUsageCount`.
+    private var windowCache: [String: (foldedCount: Int, nowBucket: Int64,
+                                        tokensToday: TokenStats, tokensLast5h: TokenStats)] = [:]
+    // `cost`/`costToday` re-walk `requestLog` too (each priced entry needs
+    // its own `PricingTable` lookup, since Feature 3's long-context
+    // surcharge is per-request — see `CodexRolloutParser.cost(pricing:
+    // model:since:)`), so they are exactly as avoidable to repeat, tick
+    // over tick, as tokensToday/tokensLast5h above. `pricing` itself never
+    // changes after this Source is constructed (`let pricing`), so unlike
+    // the parser's own windowed sums this only needs `model` added to the
+    // cache key alongside `foldedRequestCount`/the coarsened bucket.
+    private var costCache: [String: (foldedCount: Int, model: String, nowBucket: Int64,
+                                      cost: Double?, costToday: Double?)] = [:]
     private var watcher: DirectoryWatcher?
+    // Round 3 (Ruling F49) — see ClaudeCodeSource's identical field for the
+    // full rationale: seeded once at init, consumed opportunistically the
+    // first time each path is seen this process, then removed either way.
+    private var pendingRestore: [String: TranscriptCheckpoint<CodexRolloutParser>]
 
-    public init(sessionsRoot: URL, pricing: PricingTable) {
+    public init(sessionsRoot: URL, pricing: PricingTable,
+                checkpoint: [String: TranscriptCheckpoint<CodexRolloutParser>] = [:]) {
         self.sessionsRoot = sessionsRoot
         self.pricing = pricing
+        self.pendingRestore = checkpoint
     }
 
     public func start(onChange: @escaping @Sendable () -> Void) {
@@ -48,6 +70,14 @@ public final class CodexSource: AgentSource, @unchecked Sendable {
         let w = watcher
         lock.unlock()
         w?.restart()
+    }
+
+    /// Round 2 Fix 3: existence only, no read of contents — a fresh user who
+    /// has never run Codex simply has no `~/.codex/sessions` at all.
+    public var dataDirectoryExists: Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: sessionsRoot.path, isDirectory: &isDir)
+            && isDir.boolValue
     }
 
     public func rescan(now: Date) -> [AgentSession] {
@@ -108,23 +138,96 @@ public final class CodexSource: AgentSource, @unchecked Sendable {
             let unchanged = mtime != nil && size != nil
                 && lastSeen[path]?.mtime == mtime && lastSeen[path]?.size == size
             if !unchanged {
-                var reader = readers[path] ?? IncrementalFileReader(url: url)
-                var parser = parsers[path] ?? CodexRolloutParser()
+                var reader: IncrementalFileReader
+                var parser: CodexRolloutParser
+                if let existingReader = readers[path], let existingParser = parsers[path] {
+                    reader = existingReader
+                    parser = existingParser
+                } else if let restore = pendingRestore.removeValue(forKey: path),
+                          let mtime, let size,
+                          restore.isValid(currentSize: UInt64(size), currentModifiedAt: mtime) {
+                    // Round 3 (Ruling F49): offset and accumulator restored
+                    // together — see ClaudeCodeSource.rescan for the full
+                    // rationale.
+                    reader = IncrementalFileReader(url: url, offset: restore.offset)
+                    parser = restore.state
+                } else {
+                    pendingRestore.removeValue(forKey: path)
+                    reader = IncrementalFileReader(url: url)
+                    parser = CodexRolloutParser()
+                }
                 for line in reader.readNewLines() { autoreleasepool { parser.consume(line) } }
                 readers[path] = reader
                 parsers[path] = parser
                 if let mtime, let size { lastSeen[path] = (mtime, size) }
             }
 
-            guard var session = parsers[path]?.session(path: path, now: now) else { continue }
-            // Codex supplies its own context window; only cost needs the table.
-            if let model = session.model { session.cost = pricing.cost(for: session.tokens, model: model) }
+            guard let parser = parsers[path] else { continue }
+            // See `ClaudeCodeSource.rescan` — identical skip-if-nothing-
+            // relevant-changed reasoning, applied to `foldedRequestCount`.
+            let windowBucket = AgentSourceTuning.windowCacheBucket(for: now)
+            let foldedCount = parser.foldedRequestCount
+            var precomputedWindow: (tokensToday: TokenStats, tokensLast5h: TokenStats)?
+            if let cached = windowCache[path],
+               cached.foldedCount == foldedCount, cached.nowBucket == windowBucket {
+                precomputedWindow = (cached.tokensToday, cached.tokensLast5h)
+            }
+            guard var session = parser.session(path: path, now: now, precomputedWindow: precomputedWindow)
+            else { continue }
+            if precomputedWindow == nil, let today = session.tokensToday, let last5h = session.tokensLast5h {
+                windowCache[path] = (foldedCount, windowBucket, today, last5h)
+            }
+            // Codex supplies its own context window; only cost needs the
+            // table. Priced per-request (Feature 3's long-context surcharge
+            // needs each request's own input size), summed by the parser —
+            // never `pricing.cost(for: session.tokens, model:)` against the
+            // cumulative total, which has no way to know which portion of it
+            // came from an over-threshold request. Cached the same way as
+            // the windowed sums just above: re-walking `requestLog` twice a
+            // tick (`cost`, `costToday` each loop it independently) for a
+            // session whose requests haven't changed is exactly as
+            // avoidable — see `costCache`'s doc comment for why `model`
+            // joins the cache key here but `pricing` doesn't need to.
+            if let model = session.model {
+                if let cached = costCache[path], cached.foldedCount == foldedCount,
+                   cached.model == model, cached.nowBucket == windowBucket {
+                    session.cost = cached.cost
+                    session.costToday = cached.costToday
+                } else {
+                    let cost = parser.cost(pricing: pricing, model: model)
+                    let costToday = parser.costToday(pricing: pricing, model: model, now: now)
+                    session.cost = cost
+                    session.costToday = costToday
+                    costCache[path] = (foldedCount, model, windowBucket, cost, costToday)
+                }
+            }
             out.append(session)
         }
         readers = readers.filter { visited.contains($0.key) }
         parsers = parsers.filter { visited.contains($0.key) }
         lastSeen = lastSeen.filter { visited.contains($0.key) }
+        windowCache = windowCache.filter { visited.contains($0.key) }
+        costCache = costCache.filter { visited.contains($0.key) }
         _lastError = walkError
+        return out
+    }
+
+    /// Snapshot of every rollout this process has actually read, ready to
+    /// persist into `Checkpoint.codexTranscripts` — see
+    /// `ClaudeCodeSource.checkpointState(now:)` for the full rationale
+    /// (Round 3 / Ruling F49).
+    public func checkpointState(now: Date) -> [String: TranscriptCheckpoint<CodexRolloutParser>] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [String: TranscriptCheckpoint<CodexRolloutParser>] = [:]
+        for (path, parser) in parsers {
+            guard let reader = readers[path], let seen = lastSeen[path] else { continue }
+            out[path] = TranscriptCheckpoint(
+                state: parser.checkpointSnapshot(now: now),
+                offset: reader.safeResumeOffset,
+                size: UInt64(seen.size),
+                modifiedAt: seen.mtime,
+                version: CodexRolloutParser.checkpointVersion)
+        }
         return out
     }
 }

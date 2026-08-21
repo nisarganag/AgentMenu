@@ -73,3 +73,44 @@ private func session(_ kind: AgentKind, _ state: SessionState, at: Date = t) -> 
     let sessions: [AgentSession] = []
     #expect(sessions.mostUrgentAgentKind(fallback: .codex) == .codex)
 }
+
+// MARK: - Round 2 Fix 4: `exactAttentionProjects`
+
+private func session(_ kind: AgentKind, project: String, _ state: SessionState) -> AgentSession {
+    AgentSession(kind: kind, nativeId: "\(kind.rawValue)-\(project)", project: project,
+                 directory: "/\(project)", state: state, startedAt: t, lastEventAt: t)
+}
+
+@Test func exactAttentionProjectsNamesOnlyExactPermissionSessions() {
+    let sessions = [
+        session(.claudeCode, project: "ezeeabanotes", .awaitingPermission(
+            PermissionRequest(tool: "Bash", summary: "", since: t), confidence: .exact)),
+        session(.codex, project: "worldmonitor", .working(Activity(body: .thinking, at: t))),
+        session(.opencode, project: "geo-reminder", .done(at: t)),
+    ]
+    #expect(sessions.exactAttentionProjects == ["ezeeabanotes"])
+}
+
+@Test func exactAttentionProjectsExcludesInferredEvenWhenExactIsAbsent() {
+    let sessions = [
+        session(.codex, project: "worldmonitor", .awaitingPermission(
+            PermissionRequest(tool: "shell", summary: "", since: t), confidence: .inferred)),
+    ]
+    #expect(sessions.exactAttentionProjects.isEmpty,
+            "a guess must never be captioned with a fact-backed session's certainty")
+}
+
+@Test func exactAttentionProjectsListsMultipleInOrder() {
+    let sessions = [
+        session(.claudeCode, project: "alpha", .awaitingPermission(
+            PermissionRequest(tool: "Bash", summary: "", since: t), confidence: .exact)),
+        session(.codex, project: "beta", .awaitingPermission(
+            PermissionRequest(tool: "shell", summary: "", since: t), confidence: .exact)),
+    ]
+    #expect(sessions.exactAttentionProjects == ["alpha", "beta"])
+}
+
+@Test func exactAttentionProjectsIsEmptyWhenNothingIsBlocked() {
+    let sessions = [session(.claudeCode, project: "alpha", .idle)]
+    #expect(sessions.exactAttentionProjects.isEmpty)
+}

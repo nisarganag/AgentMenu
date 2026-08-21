@@ -47,6 +47,12 @@ public final class OpencodeSource: AgentSource, @unchecked Sendable {
     }
     public func restart() { /* a timer needs no rebuild after wake */ }
 
+    /// Round 2 Fix 3: existence only, no open of the DB — a fresh user who
+    /// has never run opencode simply has no `opencode.db` at all.
+    public var dataDirectoryExists: Bool {
+        FileManager.default.fileExists(atPath: dbPath)
+    }
+
     public func rescan(now: Date) -> [AgentSession] {
         lock.lock(); defer { lock.unlock() }
 

@@ -72,6 +72,55 @@ private let json = """
     #expect(abs(cost - 2.0) < 0.0001)
 }
 
+// MARK: - Feature 3: long-context surcharge
+
+@Test func longContextMultiplierAppliesOnlyAboveTheThreshold() throws {
+    let table = try PricingTable.decode(#"""
+    {"models":{"m":{"inputPerMTok":2.0,"outputPerMTok":12.0,"longContextThreshold":272000,
+    "longContextInputMultiplier":2.0,"longContextOutputMultiplier":1.5}}}
+    """#.data(using: .utf8)!)
+    let t = TokenStats(input: 100_000, output: 1_000)
+
+    let below = try #require(table.cost(for: t, model: "m", requestInputTokens: 200_000))
+    #expect(abs(below - 0.212) < 0.0001)   // 100_000/1e6*2.0 + 1_000/1e6*12.0
+
+    let above = try #require(table.cost(for: t, model: "m", requestInputTokens: 300_000))
+    #expect(abs(above - 0.418) < 0.0001)   // (100_000*2)/1e6*2.0 + (1_000*1.5)/1e6*12.0
+}
+
+@Test func longContextMultiplierAppliesToCacheRatesToo() throws {
+    // Cache reads are still "input side" of the bill — a heavily-cached
+    // over-threshold request must not dodge the surcharge just because most
+    // of its tokens happened to hit the cache.
+    let table = try PricingTable.decode(#"""
+    {"models":{"m":{"cacheReadPerMTok":0.2,"longContextThreshold":272000,
+    "longContextInputMultiplier":2.0}}}
+    """#.data(using: .utf8)!)
+    let t = TokenStats(cacheRead: 1_000_000)
+    let cost = try #require(table.cost(for: t, model: "m", requestInputTokens: 300_000))
+    #expect(abs(cost - 0.4) < 0.0001, "0.2/M cache rate, doubled, over 1M cached tokens")
+}
+
+@Test func omittingRequestInputTokensNeverAppliesTheLongContextMultiplier() throws {
+    // A cumulative/session-level total has no single request size — the
+    // default (nil) must never guess a multiplier for it, however low the
+    // configured threshold.
+    let table = try PricingTable.decode(#"""
+    {"models":{"m":{"inputPerMTok":2.0,"longContextThreshold":1,"longContextInputMultiplier":100.0}}}
+    """#.data(using: .utf8)!)
+    let cost = try #require(table.cost(for: TokenStats(input: 1_000_000), model: "m"))
+    #expect(abs(cost - 2.0) < 0.0001)
+}
+
+@Test func modelsWithoutLongContextFieldsAreUnaffectedByRequestInputTokens() throws {
+    let table = try PricingTable.decode(#"""
+    {"models":{"m":{"inputPerMTok":2.0}}}
+    """#.data(using: .utf8)!)
+    let cost = try #require(table.cost(for: TokenStats(input: 1_000_000), model: "m",
+                                       requestInputTokens: 999_999_999))
+    #expect(abs(cost - 2.0) < 0.0001, "no threshold configured means no surcharge, ever")
+}
+
 @Test func shippedPricingFileCoversEveryModelInActualUse() throws {
     let repoRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()   // AgentMenuCoreTests
@@ -94,6 +143,21 @@ private let json = """
     for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"] {
         #expect(table.cost(for: TokenStats(input: 1000), model: id) != nil, "\(id) needs rates")
         #expect(table.contextWindow(for: id) == nil, "\(id) window comes from the rollout")
+        // Feature 3: every Codex model carries OpenAI's long-context surcharge.
+        #expect(table.models[id]?.longContextThreshold == 272_000, "\(id) needs the long-context threshold")
+        #expect(table.models[id]?.longContextInputMultiplier == 2.0, "\(id) needs the 2x input multiplier")
+        #expect(table.models[id]?.longContextOutputMultiplier == 1.5, "\(id) needs the 1.5x output multiplier")
+        let overThreshold = try #require(
+            table.cost(for: TokenStats(input: 1000), model: id, requestInputTokens: 300_000))
+        let underThreshold = try #require(
+            table.cost(for: TokenStats(input: 1000), model: id, requestInputTokens: 100_000))
+        #expect(overThreshold > underThreshold,
+                "\(id) must cost more for the same tokens once the request crosses the threshold")
+    }
+    // Claude/opencode models must NOT carry a long-context surcharge —
+    // it is an OpenAI-specific pricing tier.
+    for id in ["claude-opus-5", "opus", "deepseek-v4-pro", "kimi-k3"] {
+        #expect(table.models[id]?.longContextThreshold == nil, "\(id) must not have an OpenAI-specific surcharge")
     }
 
     // opencode: window required (cost is native to opencode's own DB).

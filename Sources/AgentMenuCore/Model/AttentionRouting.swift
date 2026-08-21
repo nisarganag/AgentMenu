@@ -48,4 +48,18 @@ extension Array where Element == AgentSession {
         }
         return best?.kind
     }
+
+    /// Round 2 Fix 4: project names of sessions awaiting permission at
+    /// EXACT confidence, in display order — the menu bar title needs the
+    /// actual identity (not just `SessionStore.attentionCount`'s raw
+    /// number) to name a single blocked session outright. Deliberately
+    /// excludes `.inferred` sessions, for the same reason
+    /// `SessionStore.attentionCount` does: a guess must never be captioned
+    /// with the same certainty as a fact-backed permission prompt.
+    public var exactAttentionProjects: [String] {
+        compactMap { s in
+            if case .awaitingPermission(_, .exact) = s.state { return s.project }
+            return nil
+        }
+    }
 }
