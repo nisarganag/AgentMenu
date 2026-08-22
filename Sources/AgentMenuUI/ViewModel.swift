@@ -119,13 +119,12 @@ public final class AppViewModel {
         burn.record(tokens: tokens, cost: cost, at: at)
     }
 
-    /// Which page the popover should open to (round-2 fix: "whichever agent
-    /// sent the last notification"). The actual tie-breaking rule
-    /// (exact permission > inferred permission > most-recent turn-finished)
-    /// is `Array<AgentSession>.mostUrgentAgentKind`, a pure function in
-    /// AgentMenuCore with its own test coverage — this is a thin, otherwise
-    /// untestable-UI-glue accessor over it, using `currentPage` (the last
-    /// page the user was on) as the final fallback.
+    /// Which page the popover should open to. The actual tie-breaking rule
+    /// (exact permission > inferred permission > longest-running session >
+    /// recently-finished turn) is `Array<AgentSession>.mostUrgentAgentKind`,
+    /// a pure function in AgentMenuCore with its own test coverage — this is
+    /// a thin, otherwise untestable-UI-glue accessor over it, using
+    /// `currentPage` (the last page the user was on) as the final fallback.
     ///
     /// Round 2 Fix 3: both the candidates AND the fallback are restricted to
     /// `visibleAgentKinds`, so this can never return a page `PagedPopoverView`
@@ -135,13 +134,13 @@ public final class AppViewModel {
     /// sessions (never-seen agents cannot have any); in that deliberate case
     /// the popover opens on the next-most-urgent VISIBLE page rather than a
     /// page that does not exist.
-    public func pageToShowOnOpen() -> AgentKind {
+    public func pageToShowOnOpen(now: Date = Date()) -> AgentKind {
         let visible = visibleAgentKinds
         guard !visible.isEmpty else { return currentPage }
         let visibleSet = Set(visible)
         let candidates = sessions.filter { visibleSet.contains($0.kind) }
         let fallback = visibleSet.contains(currentPage) ? currentPage : visible[0]
-        return candidates.mostUrgentAgentKind(fallback: fallback)
+        return candidates.mostUrgentAgentKind(now: now, fallback: fallback)
     }
 
     /// Focus the window this session lives in. Best-effort by design: if the

@@ -10,7 +10,7 @@
   <img alt="platform macOS 14+" src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey">
   <img alt="universal binary" src="https://img.shields.io/badge/arch-universal%20(arm64%20%2B%20x86__64)-blue">
   <img alt="Swift 6.0" src="https://img.shields.io/badge/Swift-6.0-orange">
-  <img alt="239 tests passing" src="https://img.shields.io/badge/tests-239%20passing-success">
+  <img alt="248 tests passing" src="https://img.shields.io/badge/tests-248%20passing-success">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -38,8 +38,10 @@ OPENCODE
 ```
 
 **One page per agent**, swiped horizontally, with three dots showing where you are. Opening the
-popover lands you on whichever agent most recently wanted something — so the thing demanding
-attention is the thing you see first.
+popover lands you on whichever agent actually wants you right now, in that order: one blocked on
+a permission prompt, else the session that has been **running longest**, else one that finished
+in the last ten minutes. Past that the page you last chose yourself wins — an agent that
+finished hours ago and has since been closed never hijacks the view.
 
 Click a row to jump to the window that agent lives in. The menu bar icon badges red for a
 confirmed permission block, amber for an inferred one.
@@ -48,7 +50,7 @@ confirmed permission block, amber for an inferred one.
 
 ## Install
 
-Download `AgentMenu-1.2.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.2.1.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -148,9 +150,9 @@ Full Xcode is not required — Command Line Tools are enough.
 ```bash
 git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
-swift test          # 239 tests
+swift test          # 248 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.2.0.dmg
+make dmg            # dist/AgentMenu-1.2.1.dmg
 make install        # copy to /Applications
 ```
 
@@ -178,7 +180,7 @@ Resource behaviour is bounded deliberately: only transcripts modified in the las
 - **Claude's `permission_prompt` hook subtype is unproven.** The `Notification` hook was verified end-to-end against a live agent, but that specific subtype never fired during testing. The idle subtype did, and maps correctly.
 - **opencode context meters need a priced model.** Windows ship for `deepseek-v4-pro` and `kimi-k3`; others show no bar until added to `pricing.json`.
 - **Codex cost is an estimate.** OpenAI applies service-tier and long-context multipliers that a flat rate table can't model.
-- Roughly **180 MB RSS** and **~3% CPU** while agents are active, most of it a one-time parse of your transcript history at launch.
+- Roughly **50 MB RSS** and **~5% CPU** measured with an agent actively working and the popover closed. Nearly all of what remains is re-walking the transcript tree on the 2s heartbeat — that same heartbeat is what drains the permission-hook spool, so it can't simply be slowed down without giving the spool its own file watcher first.
 
 ---
 

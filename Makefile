@@ -1,4 +1,4 @@
-VERSION  := 1.2.0
+VERSION  := 1.2.1
 APP      := dist/AgentMenu.app
 BIN      := .build/apple/Products/Release/AgentMenuApp
 DMG      := dist/AgentMenu-$(VERSION).dmg

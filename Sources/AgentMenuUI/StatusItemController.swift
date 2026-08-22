@@ -8,14 +8,46 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private let model: AppViewModel
     private let onQuit: () -> Void
+    private let onPreferences: () -> Void
 
     public init(model: AppViewModel, onPreferences: @escaping () -> Void,
                 onQuit: @escaping () -> Void) {
         self.model = model
         self.onQuit = onQuit
+        self.onPreferences = onPreferences
         super.init()
         popover.behavior = .transient
         popover.animates = false
+        popover.delegate = self
+        // NOTE: `contentViewController` is deliberately NOT built here — see
+        // `mountContent()`. It is created on open and destroyed on close.
+    }
+
+    /// PERF (owner report: 17% CPU at rest). The popover's SwiftUI tree used
+    /// to be built once in `init` and then live for the entire run of the
+    /// app, on screen or not. `StatusDot` drives a
+    /// `.repeatForever(autoreverses:)` pulse for every working or
+    /// permission-blocked session, and a repeating animation does not care
+    /// whether anyone can see it: it keeps requesting display updates, so
+    /// Core Animation re-ran the full commit/layout cycle at frame rate
+    /// forever, behind a closed popover.
+    ///
+    /// Measured on the owner's machine, popover closed, one session working:
+    /// 17.0% CPU with the tree resident, 4.5% with the pulse disabled — the
+    /// hidden animation alone was ~12.5 points.
+    ///
+    /// Suppressing model mutations while hidden (the earlier fix, still in
+    /// `AppDelegate.tick`) could never have caught this: the animation is
+    /// self-perpetuating and needs no model change to keep going. So the
+    /// tree is now mounted on open and torn down on close — a hidden view
+    /// that does not exist cannot do work, which closes the whole class of
+    /// bug rather than this one instance of it.
+    ///
+    /// Rebuilding is cheap (one small view, milliseconds) and loses nothing:
+    /// the only cross-open state that matters, the current page, lives on
+    /// `AppViewModel`, not in SwiftUI `@State`.
+    private func mountContent() {
+        guard popover.contentViewController == nil else { return }
         popover.contentViewController = NSHostingController(
             rootView: PopoverView(model: model, onPreferences: onPreferences, onQuit: onQuit))
         // Belt-and-suspenders alongside PopoverView's own fixed `.frame`
@@ -23,8 +55,19 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
         // NSHostingController's preferred content size, which is exactly
         // the path that let the popover resize/reposition/clip as content
         // changed. Setting this explicitly makes NSPopover authoritative
-        // too, not just the SwiftUI view.
+        // too, not just the SwiftUI view. Must be re-applied on every mount,
+        // since it is a property of the content pairing.
         popover.contentSize = NSSize(width: Theme.popoverWidth, height: Theme.popoverHeight)
+    }
+
+    /// Closed by ANY route — the status item clicked again, click-outside on
+    /// a `.transient` popover, or Escape. Deferred by one runloop turn so the
+    /// controller is never released from inside AppKit's own dismissal.
+    public func popoverDidClose(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.popover.isShown else { return }
+            self.popover.contentViewController = nil
+        }
     }
 
     public func install() {
@@ -37,9 +80,11 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
 
     /// Whether the popover is currently on screen.
     ///
-    /// The caller uses this to skip refreshing the observable model while hidden:
-    /// the SwiftUI tree stays instantiated behind a closed popover, so mutating
-    /// the model re-renders something nobody can see.
+    /// The caller uses this to skip refreshing the observable model while
+    /// hidden. Still worth doing even though `mountContent`/`popoverDidClose`
+    /// now destroy the hidden tree outright: refreshing costs real work
+    /// (`store.all`, windowed token folds) whose only consumer is that tree,
+    /// so with nothing mounted there is nobody left to render the result.
     public var isPopoverShown: Bool { popover.isShown }
 
     @objc private func togglePopover() {
@@ -48,13 +93,15 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             model.refresh()
-            // Round-2 fix: land on whichever agent most recently demanded
-            // attention (exact permission prompt, then inferred, then
-            // most-recently-finished turn) rather than always reopening on
+            // Land on whichever agent actually wants the user right now —
+            // a permission prompt first, else the longest-running session,
+            // else a turn that finished recently enough to still be why the
+            // popover is being opened — rather than always reopening on
             // whatever page was last viewed. Set BEFORE `show`, so the
             // paged view is already scrolled to the right page the instant
             // it becomes visible — no on-screen jump.
             model.currentPage = model.pageToShowOnOpen()
+            mountContent()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
