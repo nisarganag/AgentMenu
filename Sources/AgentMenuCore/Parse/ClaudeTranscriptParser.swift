@@ -27,7 +27,13 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
     /// a field in a way `Codable` alone would not catch (e.g. same name and
     /// type, different unit). Never bump this for a change that doesn't touch
     /// the shape of this struct's persisted state.
-    public static let checkpointVersion = 1
+    /// Bumped 1 -> 2: `recentResponseIds` is new persisted state, and — far
+    /// more importantly — the meaning of the persisted `tokens`/`usageLog`
+    /// changed. Every checkpoint written before this carries the inflated,
+    /// duplicate-counted totals described on `recentResponseIds`. They must
+    /// be discarded and re-derived from the transcripts, not carried
+    /// forward, or the fix would never reach anyone already running the app.
+    public static let checkpointVersion = 2
 
     private var sessionId: String?
     private var cwd: String?
@@ -49,6 +55,32 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
     /// Most recent real Claude rate-limit error seen (Feature 2) — see
     /// `AgentSession.lastRateLimitAt`.
     private var lastRateLimitAt: Date?
+
+    /// Identifiers of the most recently folded API responses, oldest first —
+    /// the guard against counting one response many times.
+    ///
+    /// Claude Code writes ONE record per content block of an assistant
+    /// response: the text lands on its own line, each `tool_use` on another,
+    /// and every one of them repeats a verbatim copy of the usage for the
+    /// WHOLE response. The usage belongs to the request, not to the record,
+    /// so summing per-record multiplies cost by however many blocks the reply
+    /// happened to contain.
+    ///
+    /// Measured on the owner's machine across all 878 transcripts on disk:
+    /// 29,026 duplicate groups, every copy byte-identical in all four token
+    /// buckets, inflating cost 2.68x — $20,271 reported against $7,577 real.
+    /// This was the "cost is grossly upwards of what the console shows" bug.
+    ///
+    /// Bounded rather than a full set, because this is persisted in every
+    /// checkpoint and a session's identifiers would otherwise grow without
+    /// limit. `dedupeWindow` is sized off the real distribution: copies of one
+    /// response are separated by a median of 2 records and at most 29 (the
+    /// interleaved records are the user-side `tool_result`s), so 128 is over
+    /// four times the worst case ever observed. Erring on this bound is safe
+    /// in one direction only — too small merely misses a duplicate and
+    /// over-counts as before, and can never subtract usage that was real.
+    private var recentResponseIds: [String] = []
+    private static let dedupeWindow = 128
 
     public init() {}
 
@@ -121,18 +153,49 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
             let cacheRd  = usage["cache_read_input_tokens"] as? Int ?? 0
             let cacheWr  = usage["cache_creation_input_tokens"] as? Int ?? 0
             let think    = (usage["output_tokens_details"] as? [String: Any])?["thinking_tokens"] as? Int ?? 0
-            tokens.input      += inTok
-            tokens.output     += outTok
-            tokens.cacheRead  += cacheRd
-            tokens.cacheWrite += cacheWr
-            tokens.reasoning  += think
-            // Live context is the LAST request's inputs, not the running total.
+
+            // Live context is the LAST request's inputs, not the running
+            // total — set before the duplicate check and outside it, since
+            // every copy of a response reports the same figure and the newest
+            // record is still the newest request either way.
             lastContextUsed = inTok + cacheRd + cacheWr
 
-            if let messageDate {
-                usageLog.append(TimedUsage(at: messageDate, tokens: TokenStats(
-                    input: inTok, output: outTok, cacheRead: cacheRd, cacheWrite: cacheWr,
-                    reasoning: think)))
+            // `message.id` is the API response id; `requestId` is Claude
+            // Code's own per-request id and is a top-level sibling of
+            // `message`. Every copy of a split response shares both, so
+            // either identifies the response. With neither, fold: counting a
+            // record twice is a smaller error than dropping real usage on the
+            // guess that two anonymous records must be the same response.
+            //
+            // Skips only the token fold, never the whole record: the copies
+            // of a response are its DIFFERENT content blocks, so the second
+            // and later ones carry the tool calls. Returning early here would
+            // leave every multi-block turn showing its opening text and never
+            // the tool it actually ran.
+            let responseId = (message["id"] as? String) ?? (obj["requestId"] as? String)
+            var alreadyFolded = false
+            if let responseId {
+                alreadyFolded = recentResponseIds.contains(responseId)
+                if !alreadyFolded {
+                    recentResponseIds.append(responseId)
+                    if recentResponseIds.count > Self.dedupeWindow {
+                        recentResponseIds.removeFirst(recentResponseIds.count - Self.dedupeWindow)
+                    }
+                }
+            }
+
+            if !alreadyFolded {
+                tokens.input      += inTok
+                tokens.output     += outTok
+                tokens.cacheRead  += cacheRd
+                tokens.cacheWrite += cacheWr
+                tokens.reasoning  += think
+
+                if let messageDate {
+                    usageLog.append(TimedUsage(at: messageDate, tokens: TokenStats(
+                        input: inTok, output: outTok, cacheRead: cacheRd, cacheWrite: cacheWr,
+                        reasoning: think)))
+                }
             }
         }
 

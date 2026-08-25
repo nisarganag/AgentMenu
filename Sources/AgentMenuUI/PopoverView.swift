@@ -36,6 +36,21 @@ public struct PopoverView: View {
 
             Divider().overlay(Theme.hairline(dark: dark))
             HStack {
+                // Balances "Quit" across the footer and answers "which build
+                // am I actually running" without opening Finder — the first
+                // thing worth knowing when reporting anything about this app.
+                // Tertiary + mono so it reads as a stamp rather than a
+                // control: it sits next to the only button down here, and
+                // anything styled like a label would invite a click.
+                // Absent entirely when the bundle has no version (see
+                // `AppVersion.display`), which is the case under `swift run`.
+                if let version = AppVersion.display(
+                    short: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) {
+                    Text(version)
+                        .font(Theme.mono(10))
+                        .foregroundStyle(Theme.textTertiary(dark: dark))
+                        .accessibilityLabel("AgentMenu version \(version.dropFirst())")
+                }
                 Spacer()
                 Button("Quit AgentMenu", action: onQuit)
                     .buttonStyle(.plain)

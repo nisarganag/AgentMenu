@@ -279,3 +279,125 @@ private func twoPassSession(splitAt: Int, now: Date) throws -> AgentSession {
     // The lifetime total needs no log at all — it is never pruned.
     #expect(restored.session(path: "/tmp/x", now: now2)?.tokens.input == 10)
 }
+
+// MARK: - One API response is written as several records (cost inflation bug)
+
+/// Claude Code writes ONE JSONL record per content block of a single assistant
+/// response — text and each tool_use land on their own line — and every one of
+/// those records carries a verbatim copy of the whole response's `usage`.
+/// Measured on the owner's machine: 29,026 duplicate groups across 878
+/// transcripts, every copy byte-identical, which made summed cost 2.68x the
+/// truth ($20,271 charged as against $7,577 real).
+private func claudeUsageLine(id: String?, requestId: String? = nil,
+                             at date: Date = Date(timeIntervalSince1970: 2_000_000_000),
+                             input: Int, output: Int, cacheRead: Int = 0,
+                             cacheWrite: Int = 0) -> Data {
+    let ts = isoWithFraction.string(from: date)
+    let idField = id.map { #""id":"\#($0)","# } ?? ""
+    let reqField = requestId.map { #""requestId":"\#($0)","# } ?? ""
+    return Data(#"""
+    {"type":"assistant",\#(reqField)"timestamp":"\#(ts)","sessionId":"s","cwd":"/p","message":{\#(idField)"model":"claude-opus-5","stop_reason":"tool_use","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":\#(input),"output_tokens":\#(output),"cache_read_input_tokens":\#(cacheRead),"cache_creation_input_tokens":\#(cacheWrite)}}}
+    """#.utf8)
+}
+
+@Test func aResponseSplitAcrossRecordsIsCountedOnce() {
+    var p = ClaudeTranscriptParser()
+    for _ in 0..<4 {
+        p.consume(claudeUsageLine(id: "msg_01", input: 6, output: 415, cacheWrite: 30_220))
+    }
+    let s = p.session(path: "/t.jsonl", now: Date(timeIntervalSince1970: 2_000_000_000))
+    #expect(s?.tokens.output == 415)
+    #expect(s?.tokens.cacheWrite == 30_220)
+    #expect(s?.tokens.input == 6)
+}
+
+@Test func genuinelyDistinctResponsesStillEachCount() {
+    var p = ClaudeTranscriptParser()
+    p.consume(claudeUsageLine(id: "msg_01", input: 1, output: 10))
+    p.consume(claudeUsageLine(id: "msg_02", input: 1, output: 10))
+    p.consume(claudeUsageLine(id: "msg_03", input: 1, output: 10))
+    let s = p.session(path: "/t.jsonl", now: Date(timeIntervalSince1970: 2_000_000_000))
+    #expect(s?.tokens.output == 30)
+}
+
+// Real duplicates are not adjacent — tool_result records from the user are
+// interleaved between them. Measured span between first and last copy of a
+// group: median 2 records, p99 9, worst 29 across every transcript on disk.
+@Test func duplicatesSeparatedByInterleavedRecordsAreStillCaught() {
+    var p = ClaudeTranscriptParser()
+    p.consume(claudeUsageLine(id: "msg_01", input: 1, output: 100))
+    for i in 0..<29 { p.consume(claudeUsageLine(id: "other_\(i)", input: 0, output: 0)) }
+    p.consume(claudeUsageLine(id: "msg_01", input: 1, output: 100))
+    let s = p.session(path: "/t.jsonl", now: Date(timeIntervalSince1970: 2_000_000_000))
+    #expect(s?.tokens.output == 100)
+}
+
+// `requestId` is a top-level sibling of `message`, and every copy of a split
+// response shares it — so it is a correct fallback when `message.id` is absent.
+@Test func requestIdDeduplicatesWhenMessageIdIsMissing() {
+    var p = ClaudeTranscriptParser()
+    p.consume(claudeUsageLine(id: nil, requestId: "req_01", input: 2, output: 50))
+    p.consume(claudeUsageLine(id: nil, requestId: "req_01", input: 2, output: 50))
+    let s = p.session(path: "/t.jsonl", now: Date(timeIntervalSince1970: 2_000_000_000))
+    #expect(s?.tokens.output == 50)
+}
+
+// With no identifier at all there is nothing to deduplicate on. Counting both
+// is the honest failure: dropping the second would discard real usage on the
+// strength of a guess that two anonymous records must be the same response.
+@Test func recordsWithNoIdentifierAreAllCountedRatherThanGuessedAt() {
+    var p = ClaudeTranscriptParser()
+    p.consume(claudeUsageLine(id: nil, input: 3, output: 20))
+    p.consume(claudeUsageLine(id: nil, input: 3, output: 20))
+    let s = p.session(path: "/t.jsonl", now: Date(timeIntervalSince1970: 2_000_000_000))
+    #expect(s?.tokens.output == 40)
+}
+
+// The windowed figures read the same per-message log, so they must dedupe too
+// — otherwise TODAY and the 5h burn stay inflated after the lifetime total is
+// fixed, which is a worse failure than both being wrong together.
+@Test func todayAndFiveHourWindowsAreDeduplicatedToo() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    var p = ClaudeTranscriptParser()
+    for _ in 0..<3 { p.consume(claudeUsageLine(id: "msg_01", at: now, input: 4, output: 200)) }
+    let s = p.session(path: "/t.jsonl", now: now)
+    #expect(s?.tokensToday?.output == 200)
+    #expect(s?.tokensLast5h?.output == 200)
+}
+
+// A checkpoint restores mid-file, so the window has to survive it: without
+// that, copies straddling the save point are re-counted on the next launch
+// and the inflation creeps back in exactly where it is hardest to notice.
+@Test func theDeduplicationWindowSurvivesACheckpointRoundTrip() throws {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    var p = ClaudeTranscriptParser()
+    p.consume(claudeUsageLine(id: "msg_01", at: now, input: 5, output: 300))
+    let restored = try JSONDecoder().decode(
+        ClaudeTranscriptParser.self,
+        from: JSONEncoder().encode(p.checkpointSnapshot(now: now)))
+    var q = restored
+    q.consume(claudeUsageLine(id: "msg_01", at: now, input: 5, output: 300))
+    let s = q.session(path: "/t.jsonl", now: now)
+    #expect(s?.tokens.output == 300)
+}
+
+// The copies of a response are its DIFFERENT content blocks — the opening text
+// on one record, each tool_use on the next. Deduplication must therefore skip
+// the token fold ONLY: bailing out of the whole record would leave every
+// multi-block turn displaying its opening sentence and never the tool it ran,
+// which is the one line on the row a person actually reads.
+@Test func aDeduplicatedRecordStillUpdatesTheDisplayedActivity() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let ts = isoWithFraction.string(from: now)
+    var p = ClaudeTranscriptParser()
+    p.consume(Data(#"""
+    {"type":"assistant","timestamp":"\#(ts)","sessionId":"s","cwd":"/p","message":{"id":"msg_01","model":"claude-opus-5","stop_reason":"tool_use","content":[{"type":"text","text":"Let me check that."}],"usage":{"input_tokens":5,"output_tokens":100}}}
+    """#.utf8))
+    p.consume(Data(#"""
+    {"type":"assistant","timestamp":"\#(ts)","sessionId":"s","cwd":"/p","message":{"id":"msg_01","model":"claude-opus-5","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","input":{"command":"swift test"}}],"usage":{"input_tokens":5,"output_tokens":100}}}
+    """#.utf8))
+    let s = p.session(path: "/t.jsonl", now: now)
+    #expect(s?.tokens.output == 100, "the response's usage is counted once")
+    #expect(s?.lastActivity?.line.contains("Bash") == true,
+            "but the tool call on the second record still reaches the row")
+}
