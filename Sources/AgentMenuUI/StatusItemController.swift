@@ -8,13 +8,17 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     private let model: AppViewModel
     private let onQuit: () -> Void
-    private let onPreferences: () -> Void
+    // Held rather than a closure: Preferences is a page of the popover now,
+    // so `PopoverView` needs the objects themselves on every remount.
+    private let installer: HookInstaller
+    private let notifier: Notifier
 
-    public init(model: AppViewModel, onPreferences: @escaping () -> Void,
+    public init(model: AppViewModel, installer: HookInstaller, notifier: Notifier,
                 onQuit: @escaping () -> Void) {
         self.model = model
         self.onQuit = onQuit
-        self.onPreferences = onPreferences
+        self.installer = installer
+        self.notifier = notifier
         super.init()
         popover.behavior = .transient
         popover.animates = false
@@ -49,7 +53,8 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
     private func mountContent() {
         guard popover.contentViewController == nil else { return }
         popover.contentViewController = NSHostingController(
-            rootView: PopoverView(model: model, onPreferences: onPreferences, onQuit: onQuit))
+            rootView: PopoverView(model: model, installer: installer,
+                                  notifier: notifier, onQuit: onQuit))
         // Belt-and-suspenders alongside PopoverView's own fixed `.frame`
         // (round-2 fix): NSPopover would otherwise size itself from
         // NSHostingController's preferred content size, which is exactly

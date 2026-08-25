@@ -47,11 +47,16 @@ Click a row to jump to the window that agent lives in. The menu bar icon badges 
 confirmed permission block, amber for an inferred one. The running version is stamped in the
 footer, so "which build am I on" never means opening Finder.
 
+Notifications can play a sound, toggled in Preferences. It is a request, not an override —
+Focus and Do Not Disturb still apply, and the panel says so rather than leaving you to wonder
+why a setting you turned on made no noise. (Banners arrive badged "Script Editor" rather than
+AgentMenu; see Known limitations for why, and why that is not fixable without a Developer ID.)
+
 ---
 
 ## Install
 
-Download `AgentMenu-1.3.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.4.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -88,7 +93,9 @@ If that reports *"No such xattr"*, the flag is already gone and the block is som
 
 There's **no Dock icon and no window** — that's intentional. Look for the pulse glyph in your menu bar, top right.
 
-Click it → **Preferences** to turn on *Start at login* and install the permission-detection hooks.
+Click it → the **gear** for Preferences, to turn on *Start at login* and install the
+permission-detection hooks. Preferences is a page of the same popover, not a separate window —
+"Back" returns you to the agents.
 
 > **Start at login requires the app to live in `/Applications`.** `SMAppService` registration fails from anywhere else.
 
@@ -154,7 +161,7 @@ git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
 swift test          # 259 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.3.0.dmg
+make dmg            # dist/AgentMenu-1.4.0.dmg
 make install        # copy to /Applications
 ```
 
@@ -178,6 +185,7 @@ Resource behaviour is bounded deliberately: only transcripts modified in the las
 ## Known limitations
 
 - **Ad-hoc signed, not notarised** — hence the one-time Gatekeeper bypass.
+- **Notifications are badged "Script Editor", not AgentMenu.** macOS refuses an ad-hoc-signed app permission to use `UNUserNotificationCenter` at all — it answers `UNErrorDomain Code=1, "Notifications are not allowed for this application"`, and the app never appears in System Settings → Notifications to be allowed. AgentMenu therefore falls back to `osascript`, whose `display notification` posts under Script Editor's identity. The banners themselves are correct and carry sound; only the name and icon in the header are wrong. Confirmed not to be a location or registration problem: same result installed in `/Applications`, after `lsregister -f`, and launched through LaunchServices. Signing with a Developer ID is the fix.
 - **Codex permission state is inferred**, as described above.
 - **Claude's `permission_prompt` hook subtype is unproven.** The `Notification` hook was verified end-to-end against a live agent, but that specific subtype never fired during testing. The idle subtype did, and maps correctly.
 - **opencode context meters need a priced model.** Windows ship for `deepseek-v4-pro` and `kimi-k3`; others show no bar until added to `pricing.json`.

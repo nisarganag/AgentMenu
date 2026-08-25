@@ -8,31 +8,52 @@ public struct PopoverView: View {
     // drives view updates through a plain `let`. Reintroduce `@Bindable` at a
     // child call site only if a two-way binding is ever needed there.
     let model: AppViewModel
-    let onPreferences: () -> Void
+    let installer: HookInstaller
+    let notifier: Notifier
     let onQuit: () -> Void
+
+    /// Preferences is a page of this popover, not a window.
+    ///
+    /// Deliberately `@State` and therefore reset every time the popover is
+    /// mounted (see `StatusItemController.mountContent`): opening the menu
+    /// bar icon should always land on the agents, which is the entire reason
+    /// the app exists — and landing on Preferences would silently defeat the
+    /// attention routing that picks WHICH agent page to open on.
+    @State private var showingSettings = false
 
     @Environment(\.colorScheme) private var scheme
     private var dark: Bool { scheme == .dark }
 
-    public init(model: AppViewModel, onPreferences: @escaping () -> Void,
+    public init(model: AppViewModel, installer: HookInstaller, notifier: Notifier,
                 onQuit: @escaping () -> Void) {
-        self.model = model; self.onPreferences = onPreferences; self.onQuit = onQuit
+        self.model = model; self.installer = installer
+        self.notifier = notifier; self.onQuit = onQuit
     }
 
     public var body: some View {
         VStack(spacing: 0) {
             HeaderView(todayCost: model.todayCost, burn5h: model.burn5h,
                        burnFraction: model.burnFraction, figuresPartial: model.figuresPartial,
-                       rateLimitFraction: model.rateLimitFraction, onPreferences: onPreferences)
+                       rateLimitFraction: model.rateLimitFraction,
+                       showingSettings: showingSettings,
+                       onPreferences: {
+                           withAnimation(.easeInOut(duration: 0.18)) { showingSettings.toggle() }
+                       })
             Divider().overlay(Theme.hairline(dark: dark))
 
-            // One page per VISIBLE agent (Round 2 Fix 3 — see
-            // `AppViewModel.visibleAgentKinds`; can be 0-3 pages), each
-            // horizontally paged and scrolling vertically on its own —
-            // round-2 fix for the single list's scrollbar jitter /
-            // scroll-to-top / clipping.
-            PagedPopoverView(model: model)
-                .frame(maxHeight: .infinity)
+            Group {
+                if showingSettings {
+                    PreferencesView(installer: installer, notifier: notifier)
+                } else {
+                    // One page per VISIBLE agent (Round 2 Fix 3 — see
+                    // `AppViewModel.visibleAgentKinds`; can be 0-3 pages),
+                    // each horizontally paged and scrolling vertically on its
+                    // own — round-2 fix for the single list's scrollbar
+                    // jitter / scroll-to-top / clipping.
+                    PagedPopoverView(model: model)
+                }
+            }
+            .frame(maxHeight: .infinity)
 
             Divider().overlay(Theme.hairline(dark: dark))
             HStack {

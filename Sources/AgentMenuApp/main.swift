@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var model = AppViewModel(store: store)
     private let notifier = Notifier()
     private var statusController: StatusItemController?
-    private var preferencesWindow: NSWindow?
 
     private var sources: [any AgentSource] = []
     // Round 3 (Ruling F49): kept as concrete-typed references, alongside the
@@ -153,8 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusController = StatusItemController(
-            model: model,
-            onPreferences: { [weak self] in self?.showPreferences() },
+            model: model, installer: installer, notifier: notifier,
             onQuit: { NSApp.terminate(nil) })
         statusController?.install()
         notifier.requestAuthorization()
@@ -426,25 +424,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastProcessScan = .distantPast
         for source in sources { source.restart() }
         tick()
-    }
-
-    private func showPreferences() {
-        if preferencesWindow == nil {
-            // Height bumped for Round 2 Fix 3's new "SHOW AGENTS" section
-            // (a label, three toggles, and an explanatory line). Not
-            // `.resizable`, so this has to fit the content up front rather
-            // than relying on the user dragging it taller.
-            let w = NSWindow(contentRect: .init(x: 0, y: 0, width: 340, height: 470),
-                             styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            w.title = "AgentMenu Preferences"
-            w.contentViewController = NSHostingController(
-                rootView: PreferencesView(installer: installer, notifier: notifier))
-            w.isReleasedWhenClosed = false
-            w.center()
-            preferencesWindow = w
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        preferencesWindow?.makeKeyAndOrderFront(nil)
     }
 
     private func loadPricing() -> PricingTable {

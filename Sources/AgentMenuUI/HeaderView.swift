@@ -14,19 +14,52 @@ public struct HeaderView: View {
     /// lowest rolling-5h burn AgentMenu has ever observed at a real
     /// rate-limit error. Nil until at least one has actually happened.
     let rateLimitFraction: Double?
+    /// Whether the popover is currently showing Preferences instead of the
+    /// agent pages. The header is one bar that morphs rather than two stacked
+    /// bars: Preferences is a page of the same popover now, not a window, so a
+    /// second chrome row would read as a dialog inside a dialog.
+    let showingSettings: Bool
     let onPreferences: () -> Void
 
     @Environment(\.colorScheme) private var scheme
     private var dark: Bool { scheme == .dark }
 
     public init(todayCost: Double, burn5h: Int, burnFraction: Double?, figuresPartial: Bool,
-                rateLimitFraction: Double?, onPreferences: @escaping () -> Void) {
+                rateLimitFraction: Double?, showingSettings: Bool = false,
+                onPreferences: @escaping () -> Void) {
         self.todayCost = todayCost; self.burn5h = burn5h
         self.burnFraction = burnFraction; self.figuresPartial = figuresPartial
-        self.rateLimitFraction = rateLimitFraction; self.onPreferences = onPreferences
+        self.rateLimitFraction = rateLimitFraction
+        self.showingSettings = showingSettings; self.onPreferences = onPreferences
     }
 
     public var body: some View {
+        if showingSettings { settingsBar } else { metricsBar }
+    }
+
+    /// Back affordance plus a title. The cost figures are deliberately dropped
+    /// here: they belong to the agent pages, and leaving them up while the
+    /// user edits a burn budget invites reading one as a preview of the other.
+    private var settingsBar: some View {
+        HStack(spacing: 8) {
+            Button(action: onPreferences) {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
+                    Text("Back").font(Theme.activity)
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary(dark: dark))
+            .accessibilityLabel("Back to agents")
+            Spacer()
+            Text("PREFERENCES").font(Theme.label)
+                .foregroundStyle(Theme.textTertiary(dark: dark))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+
+    private var metricsBar: some View {
         HStack(spacing: 10) {
             // Feature 1: this used to be labelled "Since Launch" because the
             // figure only ever counted burn actually OBSERVED while
@@ -65,6 +98,7 @@ public struct HeaderView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(Theme.textSecondary(dark: dark))
+            .accessibilityLabel("Preferences")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)

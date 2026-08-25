@@ -13,6 +13,7 @@ public final class Notifier: @unchecked Sendable {
 
     private static let enabledDefaultsKey = "agentmenu.notificationsEnabled"
     private static let mutedKindsDefaultsKey = "agentmenu.mutedAgentKinds"
+    private static let soundDefaultsKey = "agentmenu.notificationSound"
 
     // Everything below is guarded by `lock`. `notify()` can run on whatever
     // background queue `DirectoryWatcher` delivers spool events on, while
@@ -21,6 +22,7 @@ public final class Notifier: @unchecked Sendable {
     // one, so they get the same lock discipline `lastSent`/`useCenter` always had.
     private var _enabled: Bool
     private var _mutedKinds: Set<AgentKind>
+    private var _soundEnabled: Bool
     private var lastSent: [String: Date] = [:]
     private var useCenter = false
     private let lock = NSLock()
@@ -45,6 +47,28 @@ public final class Notifier: @unchecked Sendable {
         }
     }
 
+    /// Whether a delivered banner also plays a sound.
+    ///
+    /// Separate from `enabled` rather than folded into it: the two answer
+    /// different questions. `enabled` is "do I want to be told at all";
+    /// this is "do I want to be told audibly", which is the setting people
+    /// actually change as they move between a quiet room and a loud one.
+    /// Defaults ON — a monitor whose entire job is catching a blocked agent
+    /// while you are looking elsewhere is not doing it silently.
+    ///
+    /// Note this cannot force sound past the system: macOS still honours
+    /// Focus, Do Not Disturb, and the per-app notification settings in
+    /// System Settings. Turning this on is a request, not an override — and
+    /// deliberately so; `.defaultCritical` would pierce Do Not Disturb and
+    /// that is not a decision a menu bar app should make for someone.
+    public var soundEnabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _soundEnabled }
+        set {
+            lock.lock(); _soundEnabled = newValue; lock.unlock()
+            UserDefaults.standard.set(newValue, forKey: Self.soundDefaultsKey)
+        }
+    }
+
     /// Loads persisted enable/mute state immediately, so it is in effect from
     /// the moment the app launches — not only after the user happens to open
     /// Preferences again. Absent keys default to enabled/unmuted, so a first
@@ -53,6 +77,7 @@ public final class Notifier: @unchecked Sendable {
     public init() {
         let d = UserDefaults.standard
         _enabled = (d.object(forKey: Self.enabledDefaultsKey) as? Bool) ?? true
+        _soundEnabled = (d.object(forKey: Self.soundDefaultsKey) as? Bool) ?? true
         if let wires = d.array(forKey: Self.mutedKindsDefaultsKey) as? [String] {
             _mutedKinds = Set(wires.compactMap(AgentKind.init(wire:)))
         } else {
@@ -108,33 +133,42 @@ public final class Notifier: @unchecked Sendable {
         }
         lastSent[key] = now
         let viaCenter = useCenter
+        let withSound = _soundEnabled
         lock.unlock()
 
         if viaCenter {
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
+            // `.default` rather than a named system sound: a named sound that
+            // is missing at runtime delivers SILENTLY, which would look
+            // exactly like the toggle not working. `.default` cannot fail.
+            if withSound { content.sound = .default }
             let request = UNNotificationRequest(identifier: UUID().uuidString,
                                                 content: content, trigger: nil)
             UNUserNotificationCenter.current().add(request) { error in
                 if let error {
                     Self.log.error("UNUserNotificationCenter delivery failed, falling back to osascript: \(error.localizedDescription, privacy: .public)")
-                    Self.viaOsascript(title: title, body: body)
+                    Self.viaOsascript(title: title, body: body, sound: withSound)
                 }
             }
         } else {
-            Self.viaOsascript(title: title, body: body)
+            Self.viaOsascript(title: title, body: body, sound: withSound)
         }
     }
 
     /// Always available, no entitlement required — the reason notifications are
     /// never on the critical path for this app.
-    private static func viaOsascript(title: String, body: String) {
+    private static func viaOsascript(title: String, body: String, sound: Bool = false) {
         let escape = { (s: String) in
             s.replacingOccurrences(of: "\\", with: "\\\\")
              .replacingOccurrences(of: "\"", with: "\\\"")
         }
-        let script = "display notification \"\(escape(body))\" with title \"\(escape(title))\""
+        // The fallback path has to carry the setting too, or sound silently
+        // becomes a coin-flip on whichever delivery route happened to be
+        // taken. "Ping" is a stock macOS sound present on every install.
+        let soundClause = sound ? " sound name \"Ping\"" : ""
+        let script = "display notification \"\(escape(body))\" with title \"\(escape(title))\"\(soundClause)"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         p.arguments = ["-e", script]
