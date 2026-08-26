@@ -10,7 +10,7 @@
   <img alt="platform macOS 14+" src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey">
   <img alt="universal binary" src="https://img.shields.io/badge/arch-universal%20(arm64%20%2B%20x86__64)-blue">
   <img alt="Swift 6.0" src="https://img.shields.io/badge/Swift-6.0-orange">
-  <img alt="259 tests passing" src="https://img.shields.io/badge/tests-259%20passing-success">
+  <img alt="268 tests passing" src="https://img.shields.io/badge/tests-268%20passing-success">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -56,7 +56,7 @@ AgentMenu; see Known limitations for why, and why that is not fixable without a 
 
 ## Install
 
-Download `AgentMenu-1.4.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.4.1.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -145,6 +145,7 @@ Push is authoritative for *state*, pull for *numbers*. If a "permission resolved
 - **Costs for models it doesn't know.** An unpriced model shows `—`, never `$0.00`. Prices live in a user-editable `pricing.json` inside the app bundle; add a model and the cost appears.
 - **Context meters without a known window.** No window, no bar — rather than a bar against a guessed size.
 - **The same API response counted more than once.** Claude Code writes one JSONL record per content block of a reply — the text on one line, each tool call on the next — and every one repeats a verbatim copy of the whole response's usage. That usage belongs to the request, not the record. Folding it per-record inflated cost 2.68x across this machine's transcripts; AgentMenu now folds once per response id.
+- **Elapsed time measured against the wall clock.** A session's duration is its first recorded activity to its last, so a finished session's figure stops moving. It used to be `now - startedAt`, which meant a six-minute session read `167h54m` after a week on disk. Idle stretches *within* a session are still counted — that is the honest answer to "how long was this session" — but time after it ended is not.
 - **Cache-read tokens in the headline count.** The displayed token figure is input + output only. Cache reads are re-reads of context already counted once and dominate the raw total — measured 92% of it on a real cache-heavy day — so including them would make the number alarming and useless. Cost still prices them correctly at 0.1x.
 - **A quota percentage you haven't hit yet.** If AgentMenu has never seen you actually rate-limited, it shows no percentage. Once it observes a real limit it will show one, measured against that.
 
@@ -159,9 +160,9 @@ Full Xcode is not required — Command Line Tools are enough.
 ```bash
 git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
-swift test          # 259 tests
+swift test          # 268 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.4.0.dmg
+make dmg            # dist/AgentMenu-1.4.1.dmg
 make install        # copy to /Applications
 ```
 

@@ -117,9 +117,15 @@ public struct SessionRowView: View {
             Text(session.cost.map { String(format: "$%.2f", $0) } ?? "—")
                 .font(Theme.mono(10)).foregroundStyle(Theme.textSecondary(dark: dark))
             Spacer(minLength: 4)
-            // Total session elapsed — a different question from activity age.
-            Text(Self.elapsed(since: session.startedAt))
+            // How long the session RAN (first activity to last), not how long
+            // ago it started. This used to be `elapsed(since: startedAt)` —
+            // i.e. now-relative — so a finished session's length climbed for
+            // as long as its transcript survived: 6-minute sessions were
+            // displaying as 167.9h. `AgentSession.span` takes no `now` at all,
+            // which is what makes that impossible rather than merely fixed.
+            Text(DurationFormat.short(session.span))
                 .font(Theme.mono(10)).foregroundStyle(Theme.textTertiary(dark: dark))
+                .help("Time from this session's first activity to its last. Includes any idle stretches within the session, but not time after it ended.")
         }
     }
 
@@ -131,10 +137,11 @@ public struct SessionRowView: View {
         }
     }
 
+    /// Age of something against the wall clock — "how long has this prompt
+    /// been waiting", "how long since the last activity". Deliberately still
+    /// now-relative: unlike a session's length, these ARE questions about the
+    /// present, and both remaining call sites want exactly that.
     static func elapsed(since: Date, now: Date = Date()) -> String {
-        let s = Int(max(0, now.timeIntervalSince(since)))
-        if s < 60 { return "\(s)s" }
-        if s < 3600 { return "\(s / 60)m\(s % 60 == 0 ? "" : "\(s % 60)s")" }
-        return "\(s / 3600)h\((s % 3600) / 60)m"
+        DurationFormat.short(now.timeIntervalSince(since))
     }
 }
