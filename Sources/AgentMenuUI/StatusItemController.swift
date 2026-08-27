@@ -3,9 +3,13 @@ import SwiftUI
 import AgentMenuCore
 
 @MainActor
-public final class StatusItemController: NSObject, NSPopoverDelegate {
+public final class StatusItemController: NSObject {
     private var statusItem: NSStatusItem?
-    private let popover = NSPopover()
+    /// Nil whenever the panel is closed — see `mountContent`.
+    private var panel: GlassPanel?
+    /// Watches for clicks outside the panel. `NSPopover.transient` used to do
+    /// this for free; a borderless panel has to do it itself.
+    private var dismissMonitors: [Any] = []
     private let model: AppViewModel
     private let onQuit: () -> Void
     // Held rather than a closure: Preferences is a page of the popover now,
@@ -20,11 +24,8 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
         self.installer = installer
         self.notifier = notifier
         super.init()
-        popover.behavior = .transient
-        popover.animates = false
-        popover.delegate = self
-        // NOTE: `contentViewController` is deliberately NOT built here — see
-        // `mountContent()`. It is created on open and destroyed on close.
+        // NOTE: the panel is deliberately NOT built here — see `mountContent`.
+        // It is created on open and destroyed on close.
     }
 
     /// PERF (owner report: 17% CPU at rest). The popover's SwiftUI tree used
@@ -51,28 +52,105 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
     /// the only cross-open state that matters, the current page, lives on
     /// `AppViewModel`, not in SwiftUI `@State`.
     private func mountContent() {
-        guard popover.contentViewController == nil else { return }
-        popover.contentViewController = NSHostingController(
-            rootView: PopoverView(model: model, installer: installer,
-                                  notifier: notifier, onQuit: onQuit))
-        // Belt-and-suspenders alongside PopoverView's own fixed `.frame`
-        // (round-2 fix): NSPopover would otherwise size itself from
-        // NSHostingController's preferred content size, which is exactly
-        // the path that let the popover resize/reposition/clip as content
-        // changed. Setting this explicitly makes NSPopover authoritative
-        // too, not just the SwiftUI view. Must be re-applied on every mount,
-        // since it is a property of the content pairing.
-        popover.contentSize = NSSize(width: Theme.popoverWidth, height: Theme.popoverHeight)
+        guard panel == nil else { return }
+        let size = NSSize(width: Theme.popoverWidth, height: Theme.popoverHeight)
+        let p = GlassPanel(size: size)
+        let host = NSHostingView(rootView: PopoverView(
+            model: model, installer: installer, notifier: notifier, onQuit: onQuit))
+        host.frame = NSRect(origin: .zero, size: size)
+        // `wantsLayer` FIRST — `host.layer` is nil until it is set, so
+        // assigning to it beforehand silently does nothing. That is exactly
+        // what happened on the first cut of this: the backing layer stayed
+        // opaque and square, so hard corners showed behind the rounded glass.
+        host.wantsLayer = true
+        host.layer?.backgroundColor = .clear
+        // The window is a rectangle; only the layer mask makes it round.
+        // Without this the glass renders a rounded surface while the layer
+        // underneath still paints its square corners around it.
+        host.layer?.cornerRadius = Self.cornerRadius
+        host.layer?.cornerCurve = .continuous
+        host.layer?.masksToBounds = true
+        p.contentView = host
+        panel = p
     }
 
-    /// Closed by ANY route — the status item clicked again, click-outside on
-    /// a `.transient` popover, or Escape. Deferred by one runloop turn so the
-    /// controller is never released from inside AppKit's own dismissal.
-    public func popoverDidClose(_ notification: Notification) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.popover.isShown else { return }
-            self.popover.contentViewController = nil
+    /// Shared by the panel's layer mask and the SwiftUI glass shape. They must
+    /// agree: a mismatch of even a point leaves either a hard edge outside the
+    /// glass or a clipped highlight inside it.
+    static let cornerRadius: CGFloat = 20
+
+    /// Positions the panel under the status item, clamped to the screen.
+    ///
+    /// `NSPopover` did this itself. Done by hand the arithmetic has to be
+    /// explicit, including the clamp: a status item near the right edge of a
+    /// small display would otherwise place a 360pt-wide panel partly offscreen.
+    private func position(_ p: GlassPanel, under button: NSStatusBarButton) {
+        guard let buttonWindow = button.window else { return }
+        let onScreen = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        let size = p.frame.size
+        var x = onScreen.midX - size.width / 2
+        var y = onScreen.minY - size.height - 6
+        if let visible = (buttonWindow.screen ?? NSScreen.main)?.visibleFrame {
+            x = min(max(visible.minX + 8, x), visible.maxX - size.width - 8)
+            y = max(visible.minY + 8, y)
         }
+        p.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    /// Click-outside-to-dismiss, which `.transient` gave us for free.
+    ///
+    /// Both monitors are required and neither is redundant: the global one
+    /// sees clicks in OTHER applications, the local one sees clicks inside
+    /// this app (the status item itself, or the Preferences field) which the
+    /// global monitor never receives. The local monitor must return its event
+    /// rather than swallow it, or clicking the status item to close would
+    /// never reach the button's own action.
+    private func startDismissMonitors() {
+        stopDismissMonitors()
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let g = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+            self?.close()
+        } { dismissMonitors.append(g) }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self, let panel = self.panel else { return event }
+            // Clicking the status item must fall through to `togglePopover`
+            // WITHOUT closing here first. Closing on the way past would leave
+            // the panel already gone by the time the button's action ran, so
+            // the toggle would read "not shown" and immediately reopen it —
+            // the icon would become impossible to dismiss with, flickering
+            // shut and back open on every click.
+            if let statusWindow = self.statusItem?.button?.window,
+               event.window === statusWindow { return event }
+            if event.window !== panel { self.close() }
+            return event
+        } { dismissMonitors.append(l) }
+        // Escape closes, matching what `.transient` did and what every other
+        // menu bar panel on the system does.
+        if let k = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.isPopoverShown, event.keyCode == 53 else { return event }
+            self.close()
+            return nil
+        } { dismissMonitors.append(k) }
+    }
+
+    private func stopDismissMonitors() {
+        dismissMonitors.forEach(NSEvent.removeMonitor)
+        dismissMonitors.removeAll()
+    }
+
+    /// Hides the panel and destroys its view tree.
+    ///
+    /// Destroying rather than hiding is load-bearing, not tidiness — see the
+    /// CPU note on `mountContent`'s predecessor: `StatusDot` runs a
+    /// `.repeatForever` pulse per active session, and a repeating animation
+    /// does not care whether anyone can see it. Left resident behind a closed
+    /// panel it kept Core Animation committing at frame rate, measured at
+    /// 17.0% CPU against 4.8% once the tree stopped existing.
+    public func close() {
+        stopDismissMonitors()
+        panel?.orderOut(nil)
+        panel?.contentView = nil
+        panel = nil
     }
 
     public func install() {
@@ -83,32 +161,40 @@ public final class StatusItemController: NSObject, NSPopoverDelegate {
         updateIcon(inferredAttention: 0, activeKinds: [], exactAttentionProjects: [])
     }
 
-    /// Whether the popover is currently on screen.
+    /// Whether the panel is currently on screen.
     ///
     /// The caller uses this to skip refreshing the observable model while
-    /// hidden. Still worth doing even though `mountContent`/`popoverDidClose`
-    /// now destroy the hidden tree outright: refreshing costs real work
-    /// (`store.all`, windowed token folds) whose only consumer is that tree,
-    /// so with nothing mounted there is nobody left to render the result.
-    public var isPopoverShown: Bool { popover.isShown }
+    /// hidden. Still worth doing even though the tree is destroyed outright on
+    /// close: refreshing costs real work (`store.all`, windowed token folds)
+    /// whose only consumer is that tree, so with nothing mounted there is
+    /// nobody left to render the result.
+    public var isPopoverShown: Bool { panel?.isVisible ?? false }
 
     @objc private func togglePopover() {
         guard let button = statusItem?.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
+        if isPopoverShown {
+            close()
         } else {
             model.refresh()
             // Land on whichever agent actually wants the user right now —
             // a permission prompt first, else the longest-running session,
             // else a turn that finished recently enough to still be why the
-            // popover is being opened — rather than always reopening on
-            // whatever page was last viewed. Set BEFORE `show`, so the
-            // paged view is already scrolled to the right page the instant
-            // it becomes visible — no on-screen jump.
+            // panel is being opened — rather than always reopening on
+            // whatever page was last viewed. Set BEFORE the panel is shown,
+            // so the paged view is already scrolled to the right page the
+            // instant it becomes visible — no on-screen jump.
             model.currentPage = model.pageToShowOnOpen()
             mountContent()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            guard let panel else { return }
+            position(panel, under: button)
+            panel.orderFrontRegardless()
+            panel.makeKey()
+            // Recomputed from the now-masked content: AppKit derives a
+            // borderless window's shadow from its frame, so without this the
+            // shadow is cast by the square window and reads as four hard
+            // corners hanging outside the rounded glass.
+            panel.invalidateShadow()
+            startDismissMonitors()
         }
     }
 

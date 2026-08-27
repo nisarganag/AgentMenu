@@ -80,10 +80,15 @@ public struct PopoverView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
         }
-        // Fixed width AND height so NSPopover never resizes/repositions/clips
-        // as content changes (round-2 fix). Shorter content stays top-aligned
-        // (PagedPopoverView/AgentPageView's own `.top`-aligned frames) rather
-        // than stretching to fill the extra space.
+        // Fixed width AND height: the panel is sized from these, and the
+        // content must not try to drive its own size (round-2 fix — content
+        // that resized itself used to make the window reposition and clip).
         .frame(width: Theme.popoverWidth, height: Theme.popoverHeight, alignment: .top)
+        // The Liquid Glass surface. This is the whole panel, not a card on
+        // top of one: `GlassPanel` is genuinely transparent, so this samples
+        // the desktop behind the window the way Control Center does. Layered
+        // over an `NSPopover` it could only ever have sampled that popover's
+        // own frame material — glass over grey.
+        .glassSurface(cornerRadius: StatusItemController.cornerRadius, dark: dark)
     }
 }

@@ -37,6 +37,10 @@ OPENCODE
 ┃    ▰▰░░░░░░░░░░░░  11%    51.5k tok    $0.45        8m41s
 ```
 
+The panel is a real **Liquid Glass** surface on macOS 26 — a transparent borderless window, not
+an `NSPopover`, because a popover draws its own background *below* your content and glass layered
+on top can only ever sample that. Below macOS 26 it falls back to a translucent material.
+
 **One page per agent**, swiped horizontally, with three dots showing where you are. Opening the
 popover lands you on whichever agent actually wants you right now, in that order: one blocked on
 a permission prompt, else the session that has been **running longest**, else one that finished
@@ -56,7 +60,7 @@ AgentMenu; see Known limitations for why, and why that is not fixable without a 
 
 ## Install
 
-Download `AgentMenu-1.4.1.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.5.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -162,7 +166,7 @@ git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
 swift test          # 268 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.4.1.dmg
+make dmg            # dist/AgentMenu-1.5.0.dmg
 make install        # copy to /Applications
 ```
 

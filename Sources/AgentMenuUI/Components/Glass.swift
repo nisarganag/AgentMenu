@@ -52,3 +52,48 @@ struct GlassStack<Content: View>: View {
         }
     }
 }
+
+extension View {
+
+    /// The panel's own Liquid Glass surface, clipped to a rounded rect.
+    ///
+    /// Split from `GlassCard` because it plays a different role: cards are
+    /// glass ON a surface, this IS the surface. It also has to clip its
+    /// content — a borderless window is square, so without the clip the
+    /// scrolling rows would run straight over the rounded corners.
+    ///
+    /// The pre-macOS-26 fallback is `.ultraThinMaterial`, the closest thing
+    /// available. It is genuinely translucent rather than a flat fill, so the
+    /// panel still reads as a floating surface on older systems even though
+    /// it lacks the refraction.
+    @ViewBuilder
+    func glassSurface(cornerRadius: CGFloat, dark: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if #available(macOS 26.0, *) {
+            self.clipShape(shape)
+                .glassEffect(.regular.tint(GlassTint.surface(dark: dark)),
+                             in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self.background(.ultraThinMaterial, in: shape)
+                .clipShape(shape)
+        }
+    }
+
+
+}
+
+/// Tints for the glass surfaces.
+enum GlassTint {
+    /// Untinted `.regular` glass over a busy wallpaper left the session rows
+    /// genuinely hard to read — verified by screenshotting the panel composited
+    /// against the owner's actual desktop, which is the only way this failure
+    /// is visible at all. Control Center does the same thing: its pills are
+    /// tinted, not clear, which is why they stay legible over anything.
+    ///
+    /// Kept deliberately light. Enough to hold contrast for 10-11pt text,
+    /// not so much that the refraction this whole change exists for is
+    /// smothered back into a flat panel.
+    static func surface(dark: Bool) -> Color {
+        dark ? Color.black.opacity(0.26) : Color.white.opacity(0.42)
+    }
+}
