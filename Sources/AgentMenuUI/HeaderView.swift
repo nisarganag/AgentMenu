@@ -72,7 +72,7 @@ public struct HeaderView: View {
             // total silently read as covering every agent.
             metric(figuresPartial ? "TODAY*" : "TODAY", String(format: "$%.2f", todayCost))
                 .help(figuresPartial
-                    ? "Excludes opencode sessions (and any source AgentMenu could not read) — their data has no per-message timestamps to compute a calendar-day total."
+                    ? "A floor, not a total. Excludes opencode sessions (no per-message timestamps to compute a calendar-day total), any source AgentMenu could not read, and usage from any model with no known price in pricing.json."
                     : "Calendar-day total since local midnight.")
             // Round 2 Fix 1: `burn5h` is already `workTokens` (input+output),
             // not `.total` — see ViewModel.refresh(). The tooltip says so

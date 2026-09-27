@@ -45,6 +45,12 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
     // `ClaudeTranscriptParser.foldedUsageCount` say can invalidate it.
     private var windowCache: [String: (foldedCount: Int, nowBucket: Int64,
                                         tokensToday: TokenStats, tokensLast5h: TokenStats)] = [:]
+    /// Per-message cost estimates, memoised on exactly the same key as
+    /// `windowCache` and for the same reason: `costEstimateToday` walks the
+    /// day's usage log, which is identical tick over tick until new usage
+    /// arrives or `now` crosses a bucket. `pricing` is fixed at construction.
+    private var costCache: [String: (foldedCount: Int, nowBucket: Int64,
+                                      cost: CostEstimate, costToday: CostEstimate)] = [:]
     private var watcher: DirectoryWatcher?
     // Round 3 (Ruling F49): seeded once at init from a loaded `Checkpoint`,
     // consumed opportunistically the first time each path is encountered by
@@ -219,6 +225,18 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
             if precomputedWindow == nil, let today = session.tokensToday, let last5h = session.tokensLast5h {
                 windowCache[path] = (foldedCount, windowBucket, today, last5h)
             }
+            let cost: CostEstimate, costToday: CostEstimate
+            if let cached = costCache[path], cached.foldedCount == foldedCount,
+               cached.nowBucket == windowBucket {
+                (cost, costToday) = (cached.cost, cached.costToday)
+            } else {
+                cost = parser.costEstimate(pricing: pricing)
+                costToday = parser.costEstimateToday(pricing: pricing, now: now)
+                costCache[path] = (foldedCount, windowBucket, cost, costToday)
+            }
+            session.cost = cost.displayDollars
+            session.costToday = costToday.displayDollars
+            session.costIsPartial = cost.isPartial
             enrich(&session)
             out.append(session)
         }
@@ -233,6 +251,7 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
         parsers = parsers.filter { visited.contains($0.key) }
         lastSeen = lastSeen.filter { visited.contains($0.key) }
         windowCache = windowCache.filter { visited.contains($0.key) }
+        costCache = costCache.filter { visited.contains($0.key) }
         _lastError = walkError
         return Self.merging(out)
     }
@@ -323,6 +342,11 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
             merged.costToday = group.contains { $0.costToday != nil }
                 ? group.reduce(0) { $0 + ($1.costToday ?? 0) }
                 : nil
+            // Partial if any member was, OR if some member had real usage but
+            // no price at all while others were priced — its spend is missing
+            // from the sum just above, so the sum is a floor, not a total.
+            merged.costIsPartial = group.contains(where: \.costIsPartial)
+                || (merged.cost != nil && group.contains { $0.cost == nil && $0.tokens.total > 0 })
             // A timestamp, not a quantity: the most recent one wins, never summed.
             merged.lastRateLimitAt = group.compactMap(\.lastRateLimitAt).max()
             merged.startedAt = group.map(\.startedAt).min()!
@@ -330,13 +354,18 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
         }
     }
 
-    /// The parser stays pure; pricing is applied here. An unpriced model must
-    /// yield `cost == nil` AND `context == nil` — never a meter against a
-    /// guessed window.
+    /// Attaches the context window. Cost is NOT computed here any more: it
+    /// used to be `pricing.cost(for: s.tokens, model: s.model)` — the whole
+    /// session's lifetime tokens at whichever model sent the LAST message —
+    /// which is the bug `RateKey` exists to fix. It now comes from the parser,
+    /// priced message by message, in `rescan`.
+    ///
+    /// The window, by contrast, genuinely does belong to the latest model: it
+    /// describes the live conversation, which is running on that model now.
+    /// An unknown model still yields `context == nil` — never a meter against
+    /// a guessed window.
     private func enrich(_ s: inout AgentSession) {
         guard let model = s.model else { s.context = nil; return }
-        s.cost = pricing.cost(for: s.tokens, model: model)
-        s.costToday = s.tokensToday.flatMap { pricing.cost(for: $0, model: model) }
         if let window = pricing.contextWindow(for: model), let used = s.context?.used {
             s.context = ContextFill(used: used, window: window)
         } else {

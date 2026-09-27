@@ -15,7 +15,12 @@ public struct CodexRolloutParser: Sendable, Codable, Equatable {
 
     /// See `ClaudeTranscriptParser.checkpointVersion` — same discipline,
     /// independent counter (Claude and Codex accumulators evolve separately).
-    public static let checkpointVersion = 1
+    ///
+    /// Bumped 1 -> 2: `RequestUsage.model` is new persisted state, `requestLog`
+    /// is no longer trimmed, and — most importantly — every earlier checkpoint
+    /// holds token counts with cache writes double-counted as input. Carrying
+    /// those forward would keep the inflated figures alive indefinitely.
+    public static let checkpointVersion = 2
 
     private var id: String?
     private var cwd: String?
@@ -37,8 +42,12 @@ public struct CodexRolloutParser: Sendable, Codable, Equatable {
     /// long-context surcharge keys off (Feature 3) — `rawInput` keeps the
     /// cache-inclusive figure for the threshold check, since the surcharge is
     /// about total prompt size, not the cache/non-cache split.
+    ///
+    /// `model` is the model in force for THIS request (the most recent
+    /// `turn_context`), so a rollout that switches model mid-session prices
+    /// each request at its own rate instead of all of them at the last one.
     private struct RequestUsage: Sendable, Codable, Equatable {
-        let at: Date; let tokens: TokenStats; let rawInput: Int
+        let at: Date; let tokens: TokenStats; let rawInput: Int; let model: String?
     }
     private var requestLog: [RequestUsage] = []
 
@@ -55,9 +64,16 @@ public struct CodexRolloutParser: Sendable, Codable, Equatable {
         let todayStart = Calendar.current.startOfDay(for: now)
         let fiveHoursAgo = now.addingTimeInterval(-5 * 3600)
         let cutoff = min(todayStart, fiveHoursAgo)
-        var copy = self
-        copy.requestLog = requestLog.filter { $0.at >= cutoff }
-        return copy
+        _ = cutoff
+        // `requestLog` is deliberately NOT trimmed here, unlike Claude's
+        // `usageLog`. It is the only source of Codex's LIFETIME cost — the
+        // long-context surcharge is decided per request, so the requests
+        // themselves have to survive, not a pre-summed total — and trimming it
+        // made every rollout's cost silently shrink to its last day of
+        // requests after any restart. Bounded in practice by the rollout's own
+        // length (a few hundred small entries at most on this machine), and
+        // evicted with the rollout once it ages out of the source's lookback.
+        return self
     }
 
     public mutating func consume(_ line: Data) {
@@ -98,11 +114,17 @@ public struct CodexRolloutParser: Sendable, Codable, Equatable {
             if let total = info["total_token_usage"] as? [String: Any] {
                 let raw    = total["input_tokens"] as? Int ?? 0
                 let cached = total["cached_input_tokens"] as? Int ?? 0
-                // Codex's input_tokens INCLUDES cached_input_tokens. Subtract,
-                // or the cost model over-charges by the entire cache.
-                tokens.input      = max(0, raw - cached)
+                let write  = total["cache_write_input_tokens"] as? Int ?? 0
+                // Codex's input_tokens INCLUDES both cached_input_tokens AND
+                // cache_write_input_tokens — subtract both. Only reads used to
+                // be subtracted, so every written token was billed twice: as
+                // input and again as a write. Proven, not assumed: across all
+                // 1,675 token_count records on the owner's machine,
+                // input - cached - write is never negative (minimum exactly 0),
+                // i.e. writes are a subset of input exactly as reads are.
+                tokens.input      = max(0, raw - cached - write)
                 tokens.cacheRead  = cached
-                tokens.cacheWrite = total["cache_write_input_tokens"] as? Int ?? 0
+                tokens.cacheWrite = write
                 tokens.output     = total["output_tokens"] as? Int ?? 0
                 tokens.reasoning  = total["reasoning_output_tokens"] as? Int ?? 0
             }
@@ -114,14 +136,16 @@ public struct CodexRolloutParser: Sendable, Codable, Equatable {
                 // exactly on real per-request snapshots).
                 let rawInput = last["input_tokens"] as? Int ?? 0
                 let cached   = last["cached_input_tokens"] as? Int ?? 0
+                let write    = last["cache_write_input_tokens"] as? Int ?? 0
                 let entry = TokenStats(
-                    input: max(0, rawInput - cached),
+                    input: max(0, rawInput - cached - write),   // see total_token_usage above
                     output: last["output_tokens"] as? Int ?? 0,
                     cacheRead: cached,
-                    cacheWrite: last["cache_write_input_tokens"] as? Int ?? 0,
+                    cacheWrite: write,
                     reasoning: last["reasoning_output_tokens"] as? Int ?? 0)
                 if let at {
-                    requestLog.append(RequestUsage(at: at, tokens: entry, rawInput: rawInput))
+                    requestLog.append(RequestUsage(at: at, tokens: entry, rawInput: rawInput,
+                                                   model: model))
                 }
             }
             if let w = info["model_context_window"] as? Int { contextWindow = w }
@@ -162,33 +186,26 @@ public struct CodexRolloutParser: Sendable, Codable, Equatable {
         requestLog.filter { $0.at >= cutoff }.map(\.tokens).reduce(TokenStats(), +)
     }
 
-    /// Session cost as the SUM of each individual request's cost, so Feature
-    /// 3's long-context surcharge — which applies above a per-request input
-    /// threshold — is priced against the request that actually crossed it,
-    /// never smeared across the session's cumulative total (which has no way
-    /// to know which portion came from an over-threshold request). When no
-    /// request ever crosses a threshold this is mathematically identical to
-    /// pricing the cumulative total in one shot, since `requestLog` entries
-    /// are exact non-overlapping deltas that sum to it (verified against real
-    /// rollouts) — so this is a drop-in replacement, not just an addition.
-    /// `since` restricts the sum to a window (`costToday`); omit it for the
-    /// whole-session figure. Returns nil only when the model itself is
-    /// unpriced — a window with no requests in it is a real zero, not unknown.
-    private func cost(pricing: PricingTable, model: String, since cutoff: Date) -> Double? {
-        guard pricing.cost(for: TokenStats(), model: model) != nil else { return nil }
-        var total = 0.0
+    /// Session cost as the SUM of each request's own cost — each at the model
+    /// in force when it was made, and with the long-context surcharge decided
+    /// by that request's own input size, never smeared across a cumulative
+    /// total that cannot say which portion crossed the threshold.
+    private func costEstimate(pricing: PricingTable, since cutoff: Date) -> CostEstimate {
+        var e = CostEstimate()
         for entry in requestLog where entry.at >= cutoff {
-            total += pricing.cost(for: entry.tokens, model: model, requestInputTokens: entry.rawInput) ?? 0
+            e.add(pricing.cost(for: entry.tokens, rate: RateKey(model: entry.model ?? ""),
+                               requestInputTokens: entry.rawInput),
+                  tokens: entry.tokens)
         }
-        return total
+        return e
     }
 
-    public func cost(pricing: PricingTable, model: String) -> Double? {
-        cost(pricing: pricing, model: model, since: .distantPast)
+    public func costEstimate(pricing: PricingTable) -> CostEstimate {
+        costEstimate(pricing: pricing, since: .distantPast)
     }
 
-    public func costToday(pricing: PricingTable, model: String, now: Date) -> Double? {
-        cost(pricing: pricing, model: model, since: Calendar.current.startOfDay(for: now))
+    public func costEstimateToday(pricing: PricingTable, now: Date) -> CostEstimate {
+        costEstimate(pricing: pricing, since: Calendar.current.startOfDay(for: now))
     }
 
     /// - Parameter precomputedWindow: see

@@ -62,10 +62,35 @@ public struct TokenStats: Sendable, Equatable, Codable {
     // accumulator's checkpoint (both the running lifetime total and each
     // logged message/request's usage).
     public var input: Int, output: Int, cacheRead: Int, cacheWrite: Int, reasoning: Int
+    /// Of `cacheWrite`, how many tokens went to the 1-HOUR cache — a subset,
+    /// never an addition. Every existing reader of `cacheWrite` (display,
+    /// `total`, context fill, burn) keeps meaning "all cache writes"; only
+    /// pricing needs the split, because a 1-hour write costs 2x input where a
+    /// 5-minute write costs 1.25x. Claude transcripts report the split in
+    /// `usage.cache_creation`; everything else leaves this 0.
+    public var cacheWrite1h: Int
     public init(input: Int = 0, output: Int = 0, cacheRead: Int = 0,
-                cacheWrite: Int = 0, reasoning: Int = 0) {
+                cacheWrite: Int = 0, reasoning: Int = 0, cacheWrite1h: Int = 0) {
         self.input = input; self.output = output; self.cacheRead = cacheRead
         self.cacheWrite = cacheWrite; self.reasoning = reasoning
+        self.cacheWrite1h = cacheWrite1h
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case input, output, cacheRead, cacheWrite, reasoning, cacheWrite1h
+    }
+
+    /// Tolerant of `cacheWrite1h` being absent, so anything persisted before
+    /// the field existed still decodes (as "no 1-hour writes") rather than
+    /// failing — and taking the rest of its container down with it.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        input = try c.decode(Int.self, forKey: .input)
+        output = try c.decode(Int.self, forKey: .output)
+        cacheRead = try c.decode(Int.self, forKey: .cacheRead)
+        cacheWrite = try c.decode(Int.self, forKey: .cacheWrite)
+        reasoning = try c.decode(Int.self, forKey: .reasoning)
+        cacheWrite1h = try c.decodeIfPresent(Int.self, forKey: .cacheWrite1h) ?? 0
     }
     /// Reasoning tokens are already counted inside `output` by every provider
     /// here, so they are excluded from the total.
@@ -103,7 +128,8 @@ extension TokenStats {
     public static func + (lhs: TokenStats, rhs: TokenStats) -> TokenStats {
         TokenStats(input: lhs.input + rhs.input, output: lhs.output + rhs.output,
                    cacheRead: lhs.cacheRead + rhs.cacheRead, cacheWrite: lhs.cacheWrite + rhs.cacheWrite,
-                   reasoning: lhs.reasoning + rhs.reasoning)
+                   reasoning: lhs.reasoning + rhs.reasoning,
+                   cacheWrite1h: lhs.cacheWrite1h + rhs.cacheWrite1h)
     }
 
     /// Bucket-wise difference, clamped at zero per bucket — the same
@@ -114,7 +140,8 @@ extension TokenStats {
         TokenStats(input: max(0, lhs.input - rhs.input), output: max(0, lhs.output - rhs.output),
                    cacheRead: max(0, lhs.cacheRead - rhs.cacheRead),
                    cacheWrite: max(0, lhs.cacheWrite - rhs.cacheWrite),
-                   reasoning: max(0, lhs.reasoning - rhs.reasoning))
+                   reasoning: max(0, lhs.reasoning - rhs.reasoning),
+                   cacheWrite1h: max(0, lhs.cacheWrite1h - rhs.cacheWrite1h))
     }
 }
 
@@ -153,6 +180,15 @@ public struct AgentSession: Identifiable, Sendable, Equatable {
     public var costToday: Double?
     public var context: ContextFill?
     public var cost: Double?
+    /// True when some of this session's usage came from a model (or a
+    /// pricing modifier) the price table does not know, so `cost` covers only
+    /// the part that could be priced. The row renders it as a floor ("$12.30+")
+    /// rather than as a complete figure.
+    ///
+    /// Exists because the alternative bit the owner directly: a model newer
+    /// than the table used to set the WHOLE session's cost to nil, erasing
+    /// months of correctly-priced history the moment one message used it.
+    public var costIsPartial: Bool = false
     public var startedAt: Date
     public var lastEventAt: Date
     public var pid: pid_t?

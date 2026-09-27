@@ -91,7 +91,11 @@ public final class AppViewModel {
         // contributes nothing to the sum, which is mathematically the same
         // as excluding it, but the UI must say so rather than imply the
         // total covers every agent.
+        // Partial if any session could not contribute a calendar-day figure
+        // at all (opencode), OR contributed a cost that is only a floor
+        // because part of its usage has no known price.
         figuresPartial = sessions.contains { $0.tokensToday == nil }
+            || sessions.contains(where: \.costIsPartial)
         todayCost = sessions.compactMap(\.costToday).reduce(0, +)
         // Round 2 Fix 1: `workTokens` (input+output), not `.total` — this
         // feeds HeaderView's displayed "LAST 5H" count and the budget

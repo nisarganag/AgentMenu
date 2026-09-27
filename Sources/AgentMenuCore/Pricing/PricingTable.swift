@@ -23,12 +23,25 @@ public struct ModelPricing: Codable, Sendable, Equatable {
     /// a longer context, not which portion happened to hit the cache.
     public let longContextInputMultiplier: Double?
     public let longContextOutputMultiplier: Double?
+    /// 1-hour prompt-cache write rate (Claude: 2x input). `cacheWritePerMTok`
+    /// is the 5-minute rate. Absent means "no known 1-hour price": usage that
+    /// actually has 1-hour writes is then unpriced rather than billed at the
+    /// cheaper 5-minute rate.
+    public let cacheWrite1hPerMTok: Double?
+    /// Fast mode's premium over standard rates, applied to every bucket (2x on
+    /// Opus 5.5 / Opus 5 / Opus 4.8). Absent means the model has no fast mode.
+    public let fastMultiplier: Double?
+    /// US-only inference uplift, applied to every bucket (1.1x on Claude 4.6
+    /// and later). Absent means the model does not support it.
+    public let usGeoMultiplier: Double?
 
     public init(inputPerMTok: Double? = nil, outputPerMTok: Double? = nil,
                 cacheReadPerMTok: Double? = nil, cacheWritePerMTok: Double? = nil,
                 contextWindow: Int? = nil, longContextThreshold: Int? = nil,
                 longContextInputMultiplier: Double? = nil,
-                longContextOutputMultiplier: Double? = nil) {
+                longContextOutputMultiplier: Double? = nil,
+                cacheWrite1hPerMTok: Double? = nil, fastMultiplier: Double? = nil,
+                usGeoMultiplier: Double? = nil) {
         self.inputPerMTok = inputPerMTok
         self.outputPerMTok = outputPerMTok
         self.cacheReadPerMTok = cacheReadPerMTok
@@ -37,6 +50,9 @@ public struct ModelPricing: Codable, Sendable, Equatable {
         self.longContextThreshold = longContextThreshold
         self.longContextInputMultiplier = longContextInputMultiplier
         self.longContextOutputMultiplier = longContextOutputMultiplier
+        self.cacheWrite1hPerMTok = cacheWrite1hPerMTok
+        self.fastMultiplier = fastMultiplier
+        self.usGeoMultiplier = usGeoMultiplier
     }
 }
 
@@ -64,36 +80,71 @@ public struct PricingTable: Sendable, Equatable {
         models[model]?.contextWindow
     }
 
+    /// Convenience for a model at standard speed and global routing.
+    public func cost(for tokens: TokenStats, model: String, requestInputTokens: Int? = nil) -> Double? {
+        cost(for: tokens, rate: RateKey(model: model), requestInputTokens: requestInputTokens)
+    }
+
+    /// Price of `tokens` billed at `rate`, or nil when that price is not known.
+    ///
+    /// "Not known" is deliberately broad: an unlisted model, a listed model
+    /// with no rates (opencode window-only entries), a fast-mode or US-only
+    /// request on a model with no multiplier for it, or 1-hour cache writes on
+    /// a model with no 1-hour rate. Every one of those used to be — or would
+    /// easily have been — silently billed at some other rate, which produces a
+    /// number that looks right and is not. nil is honest; `CostEstimate` then
+    /// decides whether that makes a whole session unknown or merely partial.
+    ///
     /// `requestInputTokens`, when supplied, is the FULL input size of the one
     /// request `tokens` describes (cache-inclusive) — used only to decide
-    /// whether Feature 3's long-context surcharge applies to this call. Pass
-    /// nil (the default) for a cumulative/session-level total, where no
-    /// single request size exists and the flat rate is the only honest
-    /// choice — applying a multiplier there would be guessing which portion
-    /// of the total came from an over-threshold request.
-    public func cost(for tokens: TokenStats, model: String, requestInputTokens: Int? = nil) -> Double? {
-        guard let p = models[model] else { return nil }
-        // A window-only entry (e.g. an opencode model, whose real cost comes from its
-        // own DB) carries no rates — report nil rather than a misleading $0.00.
+    /// whether the long-context surcharge applies to this call. Pass nil for a
+    /// cumulative total, where no single request size exists and the flat rate
+    /// is the only honest choice.
+    public func cost(for tokens: TokenStats, rate: RateKey, requestInputTokens: Int? = nil) -> Double? {
+        guard let p = models[rate.model] else { return nil }
         guard p.inputPerMTok != nil || p.outputPerMTok != nil
            || p.cacheReadPerMTok != nil || p.cacheWritePerMTok != nil else { return nil }
+
+        var modifier = 1.0
+        if rate.fast {
+            guard let m = p.fastMultiplier else { return nil }
+            modifier *= m
+        }
+        if rate.usGeo {
+            guard let m = p.usGeoMultiplier else { return nil }
+            modifier *= m
+        }
+        let oneHour = min(tokens.cacheWrite1h, tokens.cacheWrite)
+        if oneHour > 0, p.cacheWrite1hPerMTok == nil { return nil }
 
         var inputRate = p.inputPerMTok ?? 0
         var cacheReadRate = p.cacheReadPerMTok ?? 0
         var cacheWriteRate = p.cacheWritePerMTok ?? 0
+        var cacheWrite1hRate = p.cacheWrite1hPerMTok ?? 0
         var outputRate = p.outputPerMTok ?? 0
         if let threshold = p.longContextThreshold, let requestInputTokens,
            requestInputTokens > threshold {
             if let mult = p.longContextInputMultiplier {
-                inputRate *= mult; cacheReadRate *= mult; cacheWriteRate *= mult
+                inputRate *= mult; cacheReadRate *= mult
+                cacheWriteRate *= mult; cacheWrite1hRate *= mult
             }
             if let mult = p.longContextOutputMultiplier { outputRate *= mult }
         }
 
         let m = 1_000_000.0
-        return Double(tokens.input)      / m * inputRate
-             + Double(tokens.output)     / m * outputRate
-             + Double(tokens.cacheRead)  / m * cacheReadRate
-             + Double(tokens.cacheWrite) / m * cacheWriteRate
+        let dollars = Double(tokens.input)                / m * inputRate
+                    + Double(tokens.output)               / m * outputRate
+                    + Double(tokens.cacheRead)            / m * cacheReadRate
+                    + Double(tokens.cacheWrite - oneHour) / m * cacheWriteRate
+                    + Double(oneHour)                     / m * cacheWrite1hRate
+        return dollars * modifier
+    }
+
+    /// Prices each bucket at its own rate and sums them. See `CostEstimate`
+    /// for how unknown buckets are folded in.
+    public func estimate(_ buckets: [RateKey: TokenStats]) -> CostEstimate {
+        var e = CostEstimate()
+        for (rate, tokens) in buckets { e.add(cost(for: tokens, rate: rate), tokens: tokens) }
+        return e
     }
 }

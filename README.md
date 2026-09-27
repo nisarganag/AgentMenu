@@ -10,7 +10,7 @@
   <img alt="platform macOS 14+" src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey">
   <img alt="universal binary" src="https://img.shields.io/badge/arch-universal%20(arm64%20%2B%20x86__64)-blue">
   <img alt="Swift 6.0" src="https://img.shields.io/badge/Swift-6.0-orange">
-  <img alt="268 tests passing" src="https://img.shields.io/badge/tests-268%20passing-success">
+  <img alt="293 tests passing" src="https://img.shields.io/badge/tests-293%20passing-success">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -60,7 +60,7 @@ AgentMenu; see Known limitations for why, and why that is not fixable without a 
 
 ## Install
 
-Download `AgentMenu-1.5.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.6.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -146,7 +146,7 @@ Push is authoritative for *state*, pull for *numbers*. If a "permission resolved
 ## What it deliberately does not show
 
 - **Rate-limit or quota percentages.** Neither Claude Code nor Codex persists quota state to disk (`rateLimits` is `null` in every transcript). Any "62% of your weekly limit" would be invented. Instead you get *absolute* rolling burn — tokens in the last 5 hours — computed exactly. Set your own budget in Preferences and a percentage appears against *that*.
-- **Costs for models it doesn't know.** An unpriced model shows `—`, never `$0.00`. Prices live in a user-editable `pricing.json` inside the app bundle; add a model and the cost appears.
+- **Costs for models it doesn't know.** Prices live in a user-editable `pricing.json` inside the app bundle, with the official source and fetch date recorded at the top. Every message is priced at **its own** model, so switching models mid-session with `/model` is billed correctly. When some of a session's usage comes from a model the table doesn't know, the session shows what it *can* price with a trailing `+` (`$12.30+`, "at least this much") rather than guessing — or blanking the whole session, which is what a brand-new model used to do. A session made entirely of unknown models still shows `—`, never `$0.00`. Add the model and the full cost appears.
 - **Context meters without a known window.** No window, no bar — rather than a bar against a guessed size.
 - **The same API response counted more than once.** Claude Code writes one JSONL record per content block of a reply — the text on one line, each tool call on the next — and every one repeats a verbatim copy of the whole response's usage. That usage belongs to the request, not the record. Folding it per-record inflated cost 2.68x across this machine's transcripts; AgentMenu now folds once per response id.
 - **Elapsed time measured against the wall clock.** A session's duration is its first recorded activity to its last, so a finished session's figure stops moving. It used to be `now - startedAt`, which meant a six-minute session read `167h54m` after a week on disk. Idle stretches *within* a session are still counted — that is the honest answer to "how long was this session" — but time after it ended is not.
@@ -161,12 +161,14 @@ The rule throughout: an unknown number renders as absent, never as a plausible-l
 
 Full Xcode is not required — Command Line Tools are enough.
 
+> **On macOS 27 with Command Line Tools only:** the macOS 27 SDK implements SwiftUI's `@State` as a macro whose compiler plugin ships only with full Xcode, so a default build fails with *"plugin for module 'SwiftUIMacros' not found"*. The Makefile pins the 26.5 SDK automatically. For bare `swift build` / `swift test`, prefix them with `SDKROOT=$(xcrun --sdk macosx26.5 --show-sdk-path)`.
+
 ```bash
 git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
-swift test          # 268 tests
+swift test          # 293 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.5.0.dmg
+make dmg            # dist/AgentMenu-1.6.0.dmg
 make install        # copy to /Applications
 ```
 
@@ -194,7 +196,7 @@ Resource behaviour is bounded deliberately: only transcripts modified in the las
 - **Codex permission state is inferred**, as described above.
 - **Claude's `permission_prompt` hook subtype is unproven.** The `Notification` hook was verified end-to-end against a live agent, but that specific subtype never fired during testing. The idle subtype did, and maps correctly.
 - **opencode context meters need a priced model.** Windows ship for `deepseek-v4-pro` and `kimi-k3`; others show no bar until added to `pricing.json`.
-- **Codex cost is an estimate.** OpenAI applies service-tier and long-context multipliers that a flat rate table can't model.
+- **Codex cost assumes the standard tier.** Long-context surcharges are applied per request, but Codex rollouts record no service tier, so Flex/Batch (50% off) and regional-processing (+10%) usage would read as standard. GPT-5.6 Sol's current price is promotional, stated by OpenAI as valid at least through 2026-11-21.
 - Roughly **50 MB RSS** and **~5% CPU** measured with an agent actively working and the popover closed. Nearly all of what remains is re-walking the transcript tree on the 2s heartbeat — that same heartbeat is what drains the permission-hook spool, so it can't simply be slowed down without giving the spool its own file watcher first.
 
 ---

@@ -722,10 +722,12 @@ nonisolated(unsafe) private let isoWithFraction: ISO8601DateFormatter = {
         var p = CodexRolloutParser()
         for l in lines { p.consume(Data(l.utf8)) }
         var s = try #require(p.session(path: fileURL.path, now: now))
-        if let model = s.model {
-            s.cost = p.cost(pricing: pricing, model: model)
-            s.costToday = p.costToday(pricing: pricing, model: model, now: now)
-        }
+        // The from-scratch reference: priced per request, exactly as
+        // `CodexSource` does on a cache miss.
+        let cost = p.costEstimate(pricing: pricing)
+        s.cost = cost.displayDollars
+        s.costToday = p.costEstimateToday(pricing: pricing, now: now).displayDollars
+        s.costIsPartial = cost.isPartial
         return s
     }
 

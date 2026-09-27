@@ -1,4 +1,12 @@
-VERSION  := 1.5.0
+VERSION  := 1.6.0
+
+# macOS 27's SDK implements SwiftUI's @State as a macro whose compiler
+# plugin (SwiftUIMacros) ships only with full Xcode, not Command Line Tools,
+# so every @State fails to expand and the build dies. The 26.x SDK still
+# ships @State as a plain property wrapper. Pin to it when present; override
+# with `make SDKROOT=...` once building under full Xcode.
+SDKROOT ?= $(shell xcrun --sdk macosx26.5 --show-sdk-path 2>/dev/null)
+export SDKROOT
 APP      := dist/AgentMenu.app
 BIN      := .build/apple/Products/Release/AgentMenuApp
 DMG      := dist/AgentMenu-$(VERSION).dmg
@@ -27,14 +35,16 @@ test:
 # merges the two single-arch Mach-O binaries into one genuine universal
 # binary at the exact BIN path the rest of this Makefile already expects,
 # so bundle/dmg/install/run below are unchanged from the brief.
+# One invocation with both --arch flags yields a universal binary directly.
+# Swift 6.4 moved every build into a shared .build/out/Products/<config>, so the
+# old per-triple paths (.build/<triple>/release/) no longer exist and building
+# the two slices separately makes the second silently overwrite the first.
+# --show-bin-path asks SwiftPM where it put the result instead of assuming.
 build:
-	swift build -c release --arch arm64
-	swift build -c release --arch x86_64
+	swift build -c release --arch arm64 --arch x86_64
 	mkdir -p .build/apple/Products/Release
-	lipo -create \
-		.build/arm64-apple-macosx/release/AgentMenuApp \
-		.build/x86_64-apple-macosx/release/AgentMenuApp \
-		-output .build/apple/Products/Release/AgentMenuApp
+	cp "$$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/AgentMenuApp" $(BIN)
+	lipo -info $(BIN)
 
 bundle: build
 	rm -rf $(APP)

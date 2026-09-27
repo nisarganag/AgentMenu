@@ -34,10 +34,17 @@ private let lastEvent = ISO8601.parse("2026-08-19T14:02:40.000Z")!
     #expect(p.session(path: "/tmp/r", now: at)?.model == "gpt-5.6-sol")
 }
 
-@Test func doesNotDoubleCountCachedInsideInputTokens() throws {
+@Test func doesNotDoubleCountCachedOrWrittenTokensInsideInputTokens() throws {
     let s = try parsedCodex(now: lastEvent)
-    // Codex's input_tokens already contains cached_input_tokens.
-    #expect(s.tokens.input == 24_046_405 - 23_615_457)
+    // Codex's input_tokens contains BOTH cached_input_tokens and
+    // cache_write_input_tokens. This test used to subtract only the cached
+    // reads — and still asserted cacheWrite == 400,931 below — so those
+    // 400,931 written tokens were counted twice: once as input, once as a
+    // write. This real fixture partitions exactly:
+    //     30,017 uncached + 23,615,457 read + 400,931 written = 24,046,405
+    // and its own total_tokens (24,136,306) is input_tokens + output_tokens,
+    // counting the whole prompt once.
+    #expect(s.tokens.input == 24_046_405 - 23_615_457 - 400_931)
     #expect(s.tokens.cacheRead == 23_615_457)
     #expect(s.tokens.cacheWrite == 400_931)
     #expect(s.tokens.output == 89_901)
@@ -201,7 +208,7 @@ private func codexTokenCount(
     p.consume(codexTokenCount(at: t0.addingTimeInterval(20),
         cumulative: (531_225, 287_567, 740), delta: (302_892, 287_567, 131)))
 
-    let cost = try #require(p.cost(pricing: pricing, model: "gpt-5.6-terra"))
+    let cost = try #require(p.costEstimate(pricing: pricing).displayDollars)
     let below = 228_333.0 / 1_000_000 * 2.0 + 609.0 / 1_000_000 * 12.0
     let aboveFlat = 15_325.0 / 1_000_000 * 2.0          // exclusive input 302892-287567, flat rate
                   + 287_567.0 / 1_000_000 * 0.2          // cached input, flat rate
@@ -228,7 +235,7 @@ private func codexTokenCount(
     p.consume(codexTokenCount(at: t0.addingTimeInterval(5),
         cumulative: (400_000, 0, 100), delta: (400_000, 0, 100)))
 
-    let cost = try #require(p.cost(pricing: pricing, model: "gpt-5.6-sol"))
+    let cost = try #require(p.costEstimate(pricing: pricing).displayDollars)
     let flat = 400_000.0 / 1_000_000 * 5.0 + 100.0 / 1_000_000 * 30.0
     #expect(abs(cost - flat) < 0.0001, "a model without long-context fields must never be surcharged")
 }
@@ -238,8 +245,11 @@ private func codexTokenCount(
     let t0 = ISO8601.parse("2026-08-19T14:00:00.000Z")!
     var p = CodexRolloutParser()
     p.consume(codexSessionMeta(at: t0))
+    // An explicitly UNKNOWN model, not a missing one: each request is now
+    // priced at the model in force when it was made.
+    p.consume(codexTurnContext(model: "unknown-model", at: t0))
     p.consume(codexTokenCount(at: t0, cumulative: (100, 0, 10), delta: (100, 0, 10)))
-    #expect(p.cost(pricing: pricing, model: "unknown-model") == nil,
+    #expect(p.costEstimate(pricing: pricing).displayDollars == nil,
             "an unknown model must render absent, never a guessed $0.00")
 }
 
@@ -258,7 +268,7 @@ private func codexTokenCount(
     p.consume(codexTokenCount(at: yesterday, cumulative: (1_000_000, 0, 0), delta: (1_000_000, 0, 0)))
     p.consume(codexTokenCount(at: earlierToday, cumulative: (1_000_100, 0, 0), delta: (100, 0, 0)))
 
-    let costToday = try #require(p.costToday(pricing: pricing, model: "gpt-5.6-sol", now: now))
+    let costToday = try #require(p.costEstimateToday(pricing: pricing, now: now).displayDollars)
     #expect(abs(costToday - (100.0 / 1_000_000 * 5.0)) < 0.0001,
             "costToday must only include today's request, not yesterday's much larger one")
 }
@@ -332,6 +342,6 @@ private func twoPassCodexSession(splitAt: Int, now: Date) throws -> AgentSession
     let now2 = now1.addingTimeInterval(3600)
     #expect(restored.session(path: "/tmp/r", now: now2)?.tokensToday?.input == 100,
             "a request inside today but outside the 5h window must survive the checkpoint prune")
-    let costToday = try #require(restored.costToday(pricing: pricing, model: "gpt-5.6-sol", now: now2))
+    let costToday = try #require(restored.costEstimateToday(pricing: pricing, now: now2).displayDollars)
     #expect(costToday > 0, "costToday is derived from requestLog too and must not silently go to zero")
 }

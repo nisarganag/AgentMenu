@@ -25,16 +25,17 @@ public final class CodexSource: AgentSource, @unchecked Sendable {
     // `foldedUsageCount`.
     private var windowCache: [String: (foldedCount: Int, nowBucket: Int64,
                                         tokensToday: TokenStats, tokensLast5h: TokenStats)] = [:]
-    // `cost`/`costToday` re-walk `requestLog` too (each priced entry needs
-    // its own `PricingTable` lookup, since Feature 3's long-context
-    // surcharge is per-request — see `CodexRolloutParser.cost(pricing:
-    // model:since:)`), so they are exactly as avoidable to repeat, tick
-    // over tick, as tokensToday/tokensLast5h above. `pricing` itself never
-    // changes after this Source is constructed (`let pricing`), so unlike
-    // the parser's own windowed sums this only needs `model` added to the
-    // cache key alongside `foldedRequestCount`/the coarsened bucket.
-    private var costCache: [String: (foldedCount: Int, model: String, nowBucket: Int64,
-                                      cost: Double?, costToday: Double?)] = [:]
+    // The cost estimates re-walk `requestLog` too (each entry needs its own
+    // `PricingTable` lookup: its own model, and a long-context surcharge
+    // decided by its own input size), so they are exactly as avoidable to
+    // repeat tick over tick as tokensToday/tokensLast5h above. `pricing`
+    // never changes after construction (`let pricing`), and each request now
+    // records the model it was made with, so nothing but the fold count and
+    // the coarsened time bucket can change the answer. (The session's model
+    // used to be part of this key because the whole rollout was priced at
+    // it — the bug that priced a model switch entirely at the newer model.)
+    private var costCache: [String: (foldedCount: Int, nowBucket: Int64,
+                                      cost: CostEstimate, costToday: CostEstimate)] = [:]
     private var watcher: DirectoryWatcher?
     // Round 3 (Ruling F49) — see ClaudeCodeSource's identical field for the
     // full rationale: seeded once at init, consumed opportunistically the
@@ -188,19 +189,18 @@ public final class CodexSource: AgentSource, @unchecked Sendable {
             // session whose requests haven't changed is exactly as
             // avoidable — see `costCache`'s doc comment for why `model`
             // joins the cache key here but `pricing` doesn't need to.
-            if let model = session.model {
-                if let cached = costCache[path], cached.foldedCount == foldedCount,
-                   cached.model == model, cached.nowBucket == windowBucket {
-                    session.cost = cached.cost
-                    session.costToday = cached.costToday
-                } else {
-                    let cost = parser.cost(pricing: pricing, model: model)
-                    let costToday = parser.costToday(pricing: pricing, model: model, now: now)
-                    session.cost = cost
-                    session.costToday = costToday
-                    costCache[path] = (foldedCount, model, windowBucket, cost, costToday)
-                }
+            let cost: CostEstimate, costToday: CostEstimate
+            if let cached = costCache[path], cached.foldedCount == foldedCount,
+               cached.nowBucket == windowBucket {
+                (cost, costToday) = (cached.cost, cached.costToday)
+            } else {
+                cost = parser.costEstimate(pricing: pricing)
+                costToday = parser.costEstimateToday(pricing: pricing, now: now)
+                costCache[path] = (foldedCount, windowBucket, cost, costToday)
             }
+            session.cost = cost.displayDollars
+            session.costToday = costToday.displayDollars
+            session.costIsPartial = cost.isPartial
             out.append(session)
         }
         readers = readers.filter { visited.contains($0.key) }

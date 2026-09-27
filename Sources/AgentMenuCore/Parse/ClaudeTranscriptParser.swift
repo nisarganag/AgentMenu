@@ -33,7 +33,13 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
     /// duplicate-counted totals described on `recentResponseIds`. They must
     /// be discarded and re-derived from the transcripts, not carried
     /// forward, or the fix would never reach anyone already running the app.
-    public static let checkpointVersion = 2
+    ///
+    /// Bumped 2 -> 3: `tokensByRate` and `TimedUsage.rate` are new persisted
+    /// state, and every earlier checkpoint was accumulated without knowing
+    /// which model each message belonged to — so its costs could only ever be
+    /// re-priced as one model, the bug this version exists to fix. Discarded
+    /// and re-derived, for the same reason as the 1 -> 2 bump.
+    public static let checkpointVersion = 3
 
     private var sessionId: String?
     private var cwd: String?
@@ -50,8 +56,18 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
     /// rather than accumulated eagerly, since which messages fall inside a
     /// calendar-day or trailing-5h window depends on `now`, not on when the
     /// line was consumed (Feature 1).
-    private struct TimedUsage: Sendable, Codable, Equatable { let at: Date; let tokens: TokenStats }
+    private struct TimedUsage: Sendable, Codable, Equatable {
+        let at: Date; let tokens: TokenStats; let rate: RateKey
+    }
     private var usageLog: [TimedUsage] = []
+    /// Lifetime usage split by what it is billed at — the source of the
+    /// session's COST, where `tokens` stays the source of its displayed counts.
+    ///
+    /// Kept separately from `usageLog` rather than derived from it: that log
+    /// is trimmed to roughly a day on every checkpoint, so pricing lifetime
+    /// cost from it would silently lose everything older after a restart.
+    /// Small in practice — one entry per model a session actually used.
+    private var tokensByRate: [RateKey: TokenStats] = [:]
     /// Most recent real Claude rate-limit error seen (Feature 2) — see
     /// `AgentSession.lastRateLimitAt`.
     private var lastRateLimitAt: Date?
@@ -153,6 +169,17 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
             let cacheRd  = usage["cache_read_input_tokens"] as? Int ?? 0
             let cacheWr  = usage["cache_creation_input_tokens"] as? Int ?? 0
             let think    = (usage["output_tokens_details"] as? [String: Any])?["thinking_tokens"] as? Int ?? 0
+            // `cache_creation_input_tokens` is every write; this is the part of
+            // it that went to the 1-hour cache, billed at 2x input rather than
+            // 1.25x. Clamped so a malformed record cannot claim more 1-hour
+            // writes than writes.
+            let cacheWr1h = min(cacheWr, (usage["cache_creation"] as? [String: Any])?[
+                "ephemeral_1h_input_tokens"] as? Int ?? 0)
+            // The model THIS message was billed at. Priced per message because
+            // a session is not one model: `/model` switches mid-conversation.
+            let rate = RateKey(model: (message["model"] as? String) ?? model ?? "",
+                               fast: usage["speed"] as? String == "fast",
+                               usGeo: usage["inference_geo"] as? String == "us")
 
             // Live context is the LAST request's inputs, not the running
             // total — set before the duplicate check and outside it, since
@@ -185,16 +212,12 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
             }
 
             if !alreadyFolded {
-                tokens.input      += inTok
-                tokens.output     += outTok
-                tokens.cacheRead  += cacheRd
-                tokens.cacheWrite += cacheWr
-                tokens.reasoning  += think
-
+                let entry = TokenStats(input: inTok, output: outTok, cacheRead: cacheRd,
+                                       cacheWrite: cacheWr, reasoning: think, cacheWrite1h: cacheWr1h)
+                tokens = tokens + entry
+                tokensByRate[rate, default: TokenStats()] = tokensByRate[rate, default: TokenStats()] + entry
                 if let messageDate {
-                    usageLog.append(TimedUsage(at: messageDate, tokens: TokenStats(
-                        input: inTok, output: outTok, cacheRead: cacheRd, cacheWrite: cacheWr,
-                        reasoning: think)))
+                    usageLog.append(TimedUsage(at: messageDate, tokens: entry, rate: rate))
                 }
             }
         }
@@ -207,6 +230,21 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
 
     /// Sum of every logged message's usage at or after `cutoff` — the shared
     /// implementation behind both `tokensToday` and `tokensLast5h`.
+    /// Lifetime cost, each message priced at its own model and modifiers.
+    public func costEstimate(pricing: PricingTable) -> CostEstimate {
+        pricing.estimate(tokensByRate)
+    }
+
+    /// Cost since local midnight, priced per message the same way.
+    public func costEstimateToday(pricing: PricingTable, now: Date) -> CostEstimate {
+        let cutoff = Calendar.current.startOfDay(for: now)
+        var buckets: [RateKey: TokenStats] = [:]
+        for entry in usageLog where entry.at >= cutoff {
+            buckets[entry.rate, default: TokenStats()] = buckets[entry.rate, default: TokenStats()] + entry.tokens
+        }
+        return pricing.estimate(buckets)
+    }
+
     private func usage(since cutoff: Date) -> TokenStats {
         usageLog.filter { $0.at >= cutoff }.map(\.tokens).reduce(TokenStats(), +)
     }

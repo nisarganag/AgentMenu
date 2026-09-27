@@ -114,7 +114,14 @@ public struct SessionRowView: View {
             Text(Self.compact(session.tokens.workTokens))
                 .font(Theme.mono(10)).foregroundStyle(Theme.textSecondary(dark: dark))
                 .help("Input + output tokens for this session (\(Self.compact(session.tokens.total)) total including cache read/write, priced separately in the cost figure).")
-            Text(session.cost.map { String(format: "$%.2f", $0) } ?? "—")
+            // A trailing "+" marks a floor: some of this session's usage came
+            // from a model the price table does not know, so the figure covers
+            // only the priced part. Better than the old behaviour, where one
+            // message from a too-new model blanked the whole session to "—".
+            Text(session.cost.map { String(format: "$%.2f", $0) + (session.costIsPartial ? "+" : "") } ?? "—")
+                .help(session.costIsPartial
+                      ? "At least this much. Some usage in this session is from a model with no known price — add it to pricing.json to include it."
+                      : "")
                 .font(Theme.mono(10)).foregroundStyle(Theme.textSecondary(dark: dark))
             Spacer(minLength: 4)
             // How long the session RAN (first activity to last), not how long
