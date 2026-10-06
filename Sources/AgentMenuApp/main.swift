@@ -365,11 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // is closed, which is exactly when the model is deliberately not refreshed.
         let storeSessions = store.all
         for s in ContextWarnings.crossed(storeSessions, armed: &contextWarningsArmed) {
-            let percent = Int((s.context?.fraction ?? 0) * 100)
-            notifier.notify(kind: s.kind,
-                            title: "\(s.project) is near its context limit",
-                            body: "\(percent)% of context used — consider compacting soon.",
-                            key: "\(s.id)/context80", now: now)
+            notifier.notify(kind: s.kind, .contextWarning(for: s), now: now)
         }
 
         let liveKinds = Array(Set(storeSessions.compactMap { s -> AgentKind? in

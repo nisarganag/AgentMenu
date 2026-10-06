@@ -347,6 +347,20 @@ public final class ClaudeCodeSource: AgentSource, @unchecked Sendable {
             // from the sum just above, so the sum is a floor, not a total.
             merged.costIsPartial = group.contains(where: \.costIsPartial)
                 || (merged.cost != nil && group.contains { $0.cost == nil && $0.tokens.total > 0 })
+            // Context fill comes from the PARENT conversation, never a
+            // subagent. It used to come from whichever member wrote last, so
+            // every time a subagent ran the fill dropped from the parent's,
+            // say, 85% to the subagent's 5% — re-arming the 80% warning — and
+            // the parent's next message crossed it again. Simulated over the
+            // owner's last 14 days that would have sent one session 172
+            // warnings and another 37, while sessions with no subagents sent
+            // exactly one. It also made the row's meter jump around. State and
+            // activity still come from the newest member above: those really
+            // are "what is happening right now", subagent work included.
+            if let parent = group.filter({ !$0.isSidechain }).max(by: { $0.lastEventAt < $1.lastEventAt }) {
+                merged.context = parent.context
+                merged.isSidechain = false
+            }
             // A timestamp, not a quantity: the most recent one wins, never summed.
             merged.lastRateLimitAt = group.compactMap(\.lastRateLimitAt).max()
             merged.startedAt = group.map(\.startedAt).min()!

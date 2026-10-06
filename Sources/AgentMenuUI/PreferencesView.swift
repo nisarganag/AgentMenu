@@ -10,6 +10,7 @@ public struct PreferencesView: View {
     @State private var hooks: (claude: Bool, codex: Bool, codexOverridden: Bool)
     @State private var notificationsOn: Bool
     @State private var soundOn: Bool
+    @State private var disabledCategories: Set<NotificationCategory>
     @State private var mutedKinds: Set<AgentKind>
     @State private var budgetText: String
     // Round 2 Fix 3: only holds kinds the user has actually touched — a kind
@@ -25,6 +26,7 @@ public struct PreferencesView: View {
         _hooks = State(initialValue: installer.status())
         _notificationsOn = State(initialValue: notifier.enabled)
         _soundOn = State(initialValue: notifier.soundEnabled)
+        _disabledCategories = State(initialValue: notifier.disabledCategories)
         _mutedKinds = State(initialValue: notifier.mutedKinds)
         let saved = UserDefaults.standard.integer(forKey: PreferencesView.budgetKey)
         _budgetText = State(initialValue: saved > 0 ? String(saved) : "")
@@ -51,7 +53,7 @@ public struct PreferencesView: View {
                 // rather than per-Toggle, so a control added later cannot
                 // quietly come back as a checkbox — which is AppKit's default
                 // and what every one of these used to render as.
-                .toggleStyle(.switch)
+                .toggleStyle(TrailingSwitchToggleStyle())
         }
         // ScrollView, not a fixed VStack: the window is not resizable, and
         // sections in cards are taller than the old divider-separated list.
@@ -164,6 +166,34 @@ public struct PreferencesView: View {
                 }
             }
 
+            // One switch per kind of notification AgentMenu can send, driven
+            // straight from `NotificationCategory.allCases` — so a type added
+            // later gets its switch here automatically rather than shipping
+            // with no way to turn it off.
+            GlassCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionLabel("NOTIFICATION TYPES")
+                    ForEach(NotificationCategory.allCases, id: \.self) { category in
+                        Toggle(isOn: Binding(
+                            get: { !disabledCategories.contains(category) },
+                            set: { on in
+                                if on { disabledCategories.remove(category) }
+                                else { disabledCategories.insert(category) }
+                                notifier.disabledCategories = disabledCategories
+                            })) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(category.label)
+                                note(category.detail)
+                            }
+                        }
+                    }
+                    if !notificationsOn {
+                        note("Notifications are off above, so none of these are sent.")
+                    }
+                }
+                .disabled(!notificationsOn)
+            }
+
             GlassCard {
                 VStack(alignment: .leading, spacing: 8) {
                     sectionLabel("BURN BUDGET")
@@ -187,4 +217,25 @@ public struct PreferencesView: View {
     }
 
     public static let budgetKey = "agentmenu.burnBudget5h"
+}
+
+/// A switch pinned to the trailing edge, with the label taking the rest of the
+/// row — the layout macOS System Settings uses.
+///
+/// The stock `.switch` style places the switch immediately after its label, so
+/// rows whose labels differ in width put their switches at different x
+/// positions. Single short labels hid that; the notification-types card, where
+/// each label carries a one-line description, made the switches zig-zag down
+/// the card (caught by screenshotting the built panel). Pinning every switch
+/// to one edge gives a straight column on every card.
+private struct TrailingSwitchToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            configuration.label
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Toggle("", isOn: configuration.$isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+        }
+    }
 }

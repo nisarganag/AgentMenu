@@ -169,10 +169,16 @@ func unreadableRootSurfacesAnErrorRatherThanReadingAsEmpty() throws {
 // worst spanning 61 (round-3 fix report). Left unmerged, these would
 // surface as duplicate-`Identifiable`-id rows in `PopoverView`'s `ForEach`.
 // This proves the fold: tokens sum across both files (real subagent spend,
-// not to be silently dropped), but `lastEventAt`/`context` come from
-// whichever file is newest rather than being summed — context fill
-// describes the live conversation right now, not a running total.
-@Test func sessionsSharingANativeIdAreMergedTokensSummedContextFromNewest() throws {
+// not to be silently dropped), `lastEventAt` comes from whichever file is
+// newest, and `context` comes from the PARENT transcript.
+//
+// This test used to expect context from the newest file — the subagent — on
+// the reasoning that the newest file is "the live conversation". It is not: a
+// subagent is a separate conversation with its own window. Taking its fill
+// made the merged context drop below 80% whenever a subagent ran, re-arming
+// the context warning so it fired again on the parent's next message — 172
+// warnings in 14 days for one of the owner's sessions.
+@Test func sessionsSharingANativeIdAreMergedTokensSummedContextFromTheParent() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("claude-\(UUID().uuidString)/projects/-Users-x-proj")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -205,10 +211,11 @@ func unreadableRootSurfacesAnErrorRatherThanReadingAsEmpty() throws {
     #expect(merged.tokens.total == 1385, "tokens are summed across the group")
     #expect(merged.lastEventAt == ISO8601.parse("2026-08-19T18:25:00.000Z"),
             "lastEventAt comes from the newer file, not the older one")
-    // Context is a property of the live conversation, not a summable
-    // quantity: it must be the NEWER file's 225 (20+200+5), never 1100+225.
-    #expect(merged.context?.used == 225,
-            "context comes from the newest file rather than being summed")
+    // Context is a property of one conversation, not a summable quantity,
+    // and the conversation it describes is the parent's: its 1100
+    // (100+1000+0) — never the subagent's 225, and never 1100+225.
+    #expect(merged.context?.used == 1100,
+            "context comes from the parent transcript, not a newer subagent")
 }
 
 // Feature 1's windowed fields must be summed across a merged subagent group

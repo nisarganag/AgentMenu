@@ -68,6 +68,13 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
     /// cost from it would silently lose everything older after a restart.
     /// Small in practice — one entry per model a session actually used.
     private var tokensByRate: [RateKey: TokenStats] = [:]
+    /// Claude Code marks every record of a subagent transcript
+    /// `isSidechain: true` (145 of 145 subagent files on the owner's machine;
+    /// never on a parent). Optional so checkpoints written before this field
+    /// existed still decode — as "not seen" — instead of being discarded and
+    /// forcing a full re-parse; the `/subagents/` path check in `session`
+    /// covers those files anyway.
+    private var sidechain: Bool?
     /// Most recent real Claude rate-limit error seen (Feature 2) — see
     /// `AgentSession.lastRateLimitAt`.
     private var lastRateLimitAt: Date?
@@ -146,6 +153,7 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
         if sessionId == nil { sessionId = obj["sessionId"] as? String }
         if let c = obj["cwd"] as? String { cwd = c }
         if let b = obj["gitBranch"] as? String, !b.isEmpty { branch = b }
+        if obj["isSidechain"] as? Bool == true { sidechain = true }
 
         // Feature 2: verified against real transcripts on disk — a failed API
         // call (rate limit, overload, billing) is logged as a top-level
@@ -185,7 +193,14 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
             // total — set before the duplicate check and outside it, since
             // every copy of a response reports the same figure and the newest
             // record is still the newest request either way.
-            lastContextUsed = inTok + cacheRd + cacheWr
+            //
+            // Only when there IS input: a request with none at all is one of
+            // Claude Code's `<synthetic>` API-error placeholders, not a real
+            // reading of the conversation. Recording it as 0% fill would dip
+            // the session below the 80% warning threshold and re-arm the
+            // warning — the same false re-fire a subagent used to cause.
+            let contextNow = inTok + cacheRd + cacheWr
+            if contextNow > 0 { lastContextUsed = contextNow }
 
             // `message.id` is the API response id; `requestId` is Claude
             // Code's own per-request id and is a top-level sibling of
@@ -323,7 +338,7 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
             tokensLast5h = usage(since: fiveHoursAgo)
         }
 
-        return AgentSession(
+        var session = AgentSession(
             kind: .claudeCode,
             nativeId: id,
             project: dir.isEmpty ? "—" : (dir as NSString).lastPathComponent,
@@ -342,5 +357,10 @@ public struct ClaudeTranscriptParser: Sendable, Codable, Equatable {
             transcriptPath: path,
             lastRateLimitAt: lastRateLimitAt
         )
+        // Claude Code's own flag, or — for transcripts written before it
+        // existed — the layout it writes subagents into:
+        // `<project>/<sessionId>/subagents/agent-*.jsonl`.
+        session.isSidechain = sidechain == true || path.contains("/subagents/")
+        return session
     }
 }

@@ -14,6 +14,7 @@ public final class Notifier: @unchecked Sendable {
     private static let enabledDefaultsKey = "agentmenu.notificationsEnabled"
     private static let mutedKindsDefaultsKey = "agentmenu.mutedAgentKinds"
     private static let soundDefaultsKey = "agentmenu.notificationSound"
+    private static let disabledCategoriesDefaultsKey = "agentmenu.disabledNotificationCategories"
 
     // Everything below is guarded by `lock`. `notify()` can run on whatever
     // background queue `DirectoryWatcher` delivers spool events on, while
@@ -23,6 +24,7 @@ public final class Notifier: @unchecked Sendable {
     private var _enabled: Bool
     private var _mutedKinds: Set<AgentKind>
     private var _soundEnabled: Bool
+    private var _disabledCategories: Set<NotificationCategory>
     private var lastSent: [String: Date] = [:]
     private var useCenter = false
     private let lock = NSLock()
@@ -69,6 +71,20 @@ public final class Notifier: @unchecked Sendable {
         }
     }
 
+    /// The notification types the user has switched OFF in Preferences.
+    ///
+    /// Stored as the OFF set, not the ON set, so a type added in a later
+    /// release arrives enabled rather than silently missing — the same
+    /// default-on stance as `enabled` and `mutedKinds`.
+    public var disabledCategories: Set<NotificationCategory> {
+        get { lock.lock(); defer { lock.unlock() }; return _disabledCategories }
+        set {
+            lock.lock(); _disabledCategories = newValue; lock.unlock()
+            UserDefaults.standard.set(newValue.map(\.rawValue).sorted(),
+                                      forKey: Self.disabledCategoriesDefaultsKey)
+        }
+    }
+
     /// Loads persisted enable/mute state immediately, so it is in effect from
     /// the moment the app launches — not only after the user happens to open
     /// Preferences again. Absent keys default to enabled/unmuted, so a first
@@ -78,6 +94,8 @@ public final class Notifier: @unchecked Sendable {
         let d = UserDefaults.standard
         _enabled = (d.object(forKey: Self.enabledDefaultsKey) as? Bool) ?? true
         _soundEnabled = (d.object(forKey: Self.soundDefaultsKey) as? Bool) ?? true
+        _disabledCategories = Set((d.array(forKey: Self.disabledCategoriesDefaultsKey) as? [String] ?? [])
+            .compactMap(NotificationCategory.init(rawValue:)))
         if let wires = d.array(forKey: Self.mutedKindsDefaultsKey) as? [String] {
             _mutedKinds = Set(wires.compactMap(AgentKind.init(wire:)))
         } else {
@@ -124,10 +142,13 @@ public final class Notifier: @unchecked Sendable {
             }
     }
 
-    public func notify(kind: AgentKind, title: String, body: String,
-                       key: String, now: Date = Date()) {
+    public func notify(kind: AgentKind, _ content: NotificationContent, now: Date = Date()) {
+        let title = content.title, body = content.body, key = content.key
         lock.lock()
-        guard _enabled, !_mutedKinds.contains(kind) else { lock.unlock(); return }
+        // Three independent gates, all of which must pass: notifications on at
+        // all, this agent not muted, and this TYPE not switched off.
+        guard _enabled, !_mutedKinds.contains(kind),
+              !_disabledCategories.contains(content.category) else { lock.unlock(); return }
         if let last = lastSent[key], now.timeIntervalSince(last) < Self.coalesceWindow {
             lock.unlock(); return
         }
@@ -180,24 +201,11 @@ public final class Notifier: @unchecked Sendable {
         }
     }
 
-    /// Maps a spool event to a banner. Inferred states are phrased as questions.
+    /// Maps a spool event to a banner. Which banner — and which settings
+    /// switch governs it — is decided by `SpoolEvent.notificationContent` in
+    /// AgentMenuCore, where it is covered by tests.
     public func handle(_ e: SpoolEvent, now: Date = Date()) {
-        switch e.event {
-        case .permissionRequired:
-            notify(kind: e.agent,
-                   title: "\(e.agent.displayName) needs permission",
-                   body: [e.tool, e.summary].compactMap { $0 }.joined(separator: "  "),
-                   // Prefixed with the agent kind, matching AgentSession.id's
-                   // "kind/nativeId" convention, so two agents can never
-                   // collide on the same coalescing key.
-                   key: "\(e.agent.rawValue)/perm/\(e.sessionId)", now: now)
-        case .turnFinished:
-            notify(kind: e.agent,
-                   title: "\(e.agent.displayName) finished",
-                   body: e.summary ?? "Turn complete",
-                   key: "\(e.agent.rawValue)/done/\(e.sessionId)", now: now)
-        case .permissionResolved, .turnStarted:
-            break
-        }
+        guard let content = e.notificationContent else { return }
+        notify(kind: e.agent, content, now: now)
     }
 }

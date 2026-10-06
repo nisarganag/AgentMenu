@@ -24,6 +24,13 @@ public struct SpoolEvent: Sendable, Equatable {
         case permissionResolved = "permission-resolved"
         case turnFinished       = "turn-finished"
         case turnStarted        = "turn-started"
+        /// A Claude Code `Notification` that does NOT block the agent — an
+        /// idle prompt, a finished subagent, a sign-in or quota notice. Never
+        /// written by a hook: Claude's Notification hook always writes
+        /// "permission-required", and the payload's `notification_type` is
+        /// what decides. Kept separate so it can notify without ever setting
+        /// the red "needs permission" state.
+        case notice             = "notice"
     }
 
     /// The only wire version `init(envelopeData:)` understands. Bumped from 1
@@ -39,13 +46,20 @@ public struct SpoolEvent: Sendable, Equatable {
     public let tool: String?
     public let summary: String?
     public let ts: Int
+    /// Claude Code's `notification_type`, verbatim (`permission_prompt`,
+    /// `idle_prompt`, `agent_completed`, …). Nil for every other agent, and
+    /// for Claude Code versions that predate the field.
+    public let notificationType: String?
+    /// Claude Code's own optional notification `title`.
+    public let title: String?
 
     public var date: Date { Date(timeIntervalSince1970: Double(ts)) }
 
     /// `SessionStore`'s tests (Task 8) and others construct events directly
     /// with this signature rather than going through the wire format.
     public init(v: Int, agent: AgentKind, event: Kind, sessionId: String, cwd: String,
-                tool: String? = nil, summary: String? = nil, ts: Int) {
+                tool: String? = nil, summary: String? = nil, ts: Int,
+                notificationType: String? = nil, title: String? = nil) {
         self.v = v
         self.agent = agent
         self.event = event
@@ -54,6 +68,8 @@ public struct SpoolEvent: Sendable, Equatable {
         self.tool = tool
         self.summary = summary
         self.ts = ts
+        self.notificationType = notificationType
+        self.title = title
     }
 
     /// Parses one spool file's raw bytes as a wire-version-2 envelope.
@@ -77,8 +93,25 @@ public struct SpoolEvent: Sendable, Equatable {
         let payload = obj["payload"] as? [String: Any] ?? [:]
 
         let fields = Self.extract(from: payload, agent: agent)
-        self.init(v: v, agent: agent, event: event, sessionId: fields.sessionId, cwd: fields.cwd,
-                  tool: fields.tool, summary: fields.summary, ts: ts)
+
+        // Claude Code's Notification hook reports twelve different kinds of
+        // notification and always arrives as "permission-required". Every one
+        // of them used to be filed as a permission request — idle prompts,
+        // subagent completions, sign-in and quota notices — each lighting the
+        // red dot as if the agent were blocked. Only the genuinely blocking
+        // types keep that; the rest become notices. A payload with no
+        // `notification_type` (older Claude Code) keeps the old meaning: the
+        // hook was only ever wired up for permission prompts.
+        var classified = event
+        let notificationType = agent == .claudeCode ? payload["notification_type"] as? String : nil
+        if event == .permissionRequired, let type = notificationType,
+           !Self.blockingNotificationTypes.contains(type) {
+            classified = .notice
+        }
+        self.init(v: v, agent: agent, event: classified, sessionId: fields.sessionId, cwd: fields.cwd,
+                  tool: fields.tool, summary: fields.summary, ts: ts,
+                  notificationType: notificationType,
+                  title: agent == .claudeCode ? payload["title"] as? String : nil)
     }
 
     /// Every agent shapes its hook/notify payload differently — this is

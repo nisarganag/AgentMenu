@@ -189,6 +189,11 @@ public struct AgentSession: Identifiable, Sendable, Equatable {
     /// than the table used to set the WHOLE session's cost to nil, erasing
     /// months of correctly-priced history the moment one message used it.
     public var costIsPartial: Bool = false
+    /// True for a Claude Code SUBAGENT transcript. Subagents report their
+    /// parent's `sessionId`, so they are merged into the parent's row — but a
+    /// subagent is a separate conversation with its own context window, and
+    /// its fill says nothing about how full the user's own conversation is.
+    public var isSidechain: Bool = false
     public var startedAt: Date
     public var lastEventAt: Date
     public var pid: pid_t?

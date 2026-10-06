@@ -138,6 +138,11 @@ public final class SessionStore: @unchecked Sendable {
                 overrides.removeValue(forKey: key)
             case .turnFinished:
                 overrides[key] = Override(state: .done(at: e.date), at: e.date, sticky: false)
+            case .notice:
+                // Informational only (an idle prompt, a finished subagent, a
+                // sign-in notice): it says nothing about whether the agent is
+                // blocked, so it must not touch the session's state.
+                break
             }
         }
         expireOverrides(now: now)

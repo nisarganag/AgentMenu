@@ -1,4 +1,4 @@
-VERSION  := 1.6.0
+VERSION  := 1.7.0
 
 # macOS 27's SDK implements SwiftUI's @State as a macro whose compiler
 # plugin (SwiftUIMacros) ships only with full Xcode, not Command Line Tools,

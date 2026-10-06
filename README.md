@@ -10,7 +10,7 @@
   <img alt="platform macOS 14+" src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey">
   <img alt="universal binary" src="https://img.shields.io/badge/arch-universal%20(arm64%20%2B%20x86__64)-blue">
   <img alt="Swift 6.0" src="https://img.shields.io/badge/Swift-6.0-orange">
-  <img alt="293 tests passing" src="https://img.shields.io/badge/tests-293%20passing-success">
+  <img alt="311 tests passing" src="https://img.shields.io/badge/tests-311%20passing-success">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
@@ -51,6 +51,13 @@ Click a row to jump to the window that agent lives in. The menu bar icon badges 
 confirmed permission block, amber for an inferred one. The running version is stamped in the
 footer, so "which build am I on" never means opening Finder.
 
+**Every kind of notification has its own switch** in Preferences → *Notification types*:
+permission & input requests, waiting for your input, turn finished, subagent finished, context
+nearly full (80%), and other Claude Code notices (sign-in, quota auto-resume). Claude Code's hook
+tells AgentMenu exactly which kind each one is, so only a genuine permission prompt or question
+lights the red "needs permission" dot. The context warning fires once when a session crosses 80%,
+and again only after a real compaction — never because a subagent happened to run.
+
 Notifications can play a sound, toggled in Preferences. It is a request, not an override —
 Focus and Do Not Disturb still apply, and the panel says so rather than leaving you to wonder
 why a setting you turned on made no noise. (Banners arrive badged "Script Editor" rather than
@@ -60,7 +67,7 @@ AgentMenu; see Known limitations for why, and why that is not fixable without a 
 
 ## Install
 
-Download `AgentMenu-1.6.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
+Download `AgentMenu-1.7.0.dmg` from [Releases](https://github.com/nisarganag/AgentMenu/releases), open it, and drag **AgentMenu.app** to Applications.
 
 ### macOS will block the first launch — here's how to get past it
 
@@ -166,9 +173,9 @@ Full Xcode is not required — Command Line Tools are enough.
 ```bash
 git clone https://github.com/nisarganag/AgentMenu.git
 cd AgentMenu
-swift test          # 293 tests
+swift test          # 311 tests
 make bundle         # dist/AgentMenu.app
-make dmg            # dist/AgentMenu-1.6.0.dmg
+make dmg            # dist/AgentMenu-1.7.0.dmg
 make install        # copy to /Applications
 ```
 
